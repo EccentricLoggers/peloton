@@ -15,8 +15,9 @@
 #include "backend/logging/frontend_logger.h"
 #include "backend/logging/records/tuple_record.h"
 #include "backend/logging/log_file.h"
+#include "backend/networking/rpc_channel.h"
+#include "backend/networking/rpc_controller.h"
 #include <dirent.h>
-#include <vector>
 
 namespace peloton {
 
@@ -47,16 +48,6 @@ class WriteAheadFrontendLogger : public FrontendLogger {
 
   void DoRecovery(void);
 
-  void StartTransactionRecovery(cid_t commit_id);
-
-  void CommitTransactionRecovery(cid_t commit_id);
-
-  void InsertTuple(TupleRecord *recovery_txn);
-
-  void DeleteTuple(TupleRecord *recovery_txn);
-
-  void UpdateTuple(TupleRecord *recovery_txn);
-
   void AbortActiveTransactions();
 
   void InitLogFilesList();
@@ -85,15 +76,6 @@ class WriteAheadFrontendLogger : public FrontendLogger {
   // Size of the log file
   size_t log_file_size;
 
-  // Txn table during recovery
-  std::map<txn_id_t, std::vector<TupleRecord *>> recovery_txn_table;
-
-  // Keep tracking max oid for setting next_oid in manager
-  // For active processing after recovery
-  oid_t max_oid = 0;
-
-  cid_t max_cid = 0;
-
   // pool for allocating non-inlined values
   VarlenPool *recovery_pool;
 
@@ -103,6 +85,9 @@ class WriteAheadFrontendLogger : public FrontendLogger {
   int log_file_counter_;
 
   int log_file_cursor_;
+
+  networking::RpcChannel *channel_ =  new networking::RpcChannel("127.0.0.1:9000");
+  networking::RpcController *controller_ = new networking::RpcController();
 };
 
 }  // namespace logging

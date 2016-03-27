@@ -14,7 +14,7 @@
 
 #include "tcp_address.h"
 #include "backend/common/logger.h"
-#include "abstract_service.pb.h"
+//#include "abstract_service.pb.h"
 
 #include <google/protobuf/service.h>
 #include <google/protobuf/message.h>

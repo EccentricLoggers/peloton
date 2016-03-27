@@ -9,6 +9,7 @@
 // Copyright (c) 2015, Carnegie Mellon University Database Group
 //
 //===----------------------------------------------------------------------===//
+#pragma once
 
 #include "rpc_type.h"
 #include "rpc_controller.h"

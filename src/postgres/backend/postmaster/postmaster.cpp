@@ -66,8 +66,10 @@
 // TODO: Peloton changes
 #include "backend/networking/rpc_client.h"
 #include "backend/networking/peloton_service.h"
+#include "backend/logging/logging_service.h"
 #include "backend/networking/rpc_server.h"
 #include "backend/networking/abstract_service.pb.h"
+#include "backend/networking/logging_service.pb.h"
 
 #include "postgres.h"
 
@@ -552,6 +554,8 @@ void* Coordinator(__attribute__((unused)) void* arg) {
     try {
         peloton::networking::RpcServer rpc_server(PELOTON_SERVER_PORT);
         service = new peloton::networking::PelotonService();
+        rpc_server.RegisterService(service);
+        service = new peloton::logging::LoggingService();
         rpc_server.RegisterService(service);
         rpc_server.Start();
     } catch (std::exception& e) {

@@ -13,6 +13,7 @@ logging_FILES = \
 			   backend/logging/loggers/wal_backend_logger.cpp \
 			   backend/logging/loggers/wbl_frontend_logger.cpp \
 			   backend/logging/loggers/wbl_backend_logger.cpp \
+			   backend/logging/logging_service.cpp \
 			   backend/logging/records/tuple_record.cpp \
 			   backend/logging/records/transaction_record.cpp \
 			   backend/logging/records/log_record_pool.cpp \

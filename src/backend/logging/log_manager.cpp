@@ -128,6 +128,7 @@ void LogManager::LogBeginTransaction(cid_t commit_id){
 	auto record = new TransactionRecord(
 		LOGRECORD_TYPE_TRANSACTION_BEGIN, commit_id);
 	logger->Log(record);
+
   }
 }
 
