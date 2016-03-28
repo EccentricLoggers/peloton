@@ -145,6 +145,12 @@ void WriteAheadFrontendLogger::FlushLogRecords(void) {
     request.set_log(message, record->GetMessageLength());
     request.set_sync_type(networking::ResponseType::SYNC);
     networking::LogRecordReplayResponse response;
+    LOG_INFO("Size before and after : %lu, %lu", record->GetMessageLength(), request.log().size());
+    char blah[request.ByteSize()];
+    request.SerializeToArray(blah, request.ByteSize());
+    networking::LogRecordReplayRequest request2;
+    request2.ParseFromArray(blah, request.ByteSize());
+    LOG_INFO("Size before and after : %lu, %lu", record->GetMessageLength(), request2.log().size());
     stub_->LogRecordReplay(controller_, &request, nullptr, nullptr);
     fwrite(record->GetMessage(), sizeof(char), record->GetMessageLength(),
            log_file);

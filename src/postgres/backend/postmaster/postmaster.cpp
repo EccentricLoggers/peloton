@@ -555,8 +555,8 @@ void* Coordinator(__attribute__((unused)) void* arg) {
         peloton::networking::RpcServer rpc_server(PELOTON_SERVER_PORT);
         service = new peloton::networking::PelotonService();
         rpc_server.RegisterService(service);
-        service = new peloton::logging::LoggingService();
-        rpc_server.RegisterService(service);
+//        service = new peloton::logging::LoggingService();
+//        rpc_server.RegisterService(service);
         rpc_server.Start();
     } catch (std::exception& e) {
         std::cerr << "STD EXCEPTION : " << e.what() << std::endl;
