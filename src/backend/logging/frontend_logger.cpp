@@ -25,6 +25,7 @@
 #include "backend/storage/data_table.h"
 #include "backend/storage/tile_group.h"
 #include "backend/storage/tuple.h"
+#include "backend/concurrency/transaction_manager_factory.h"
 
 // configuration for testing
 extern int64_t peloton_wait_timeout;
@@ -241,6 +242,9 @@ void FrontendLogger::CommitTransactionRecovery(cid_t commit_id) {
       default:
 	continue;
     }
+    if (concurrency::TransactionManagerFactory::GetInstance().GetNextCommitId() <= commit_id){
+	concurrency::TransactionManagerFactory::GetInstance().SetNextCid(commit_id+1);
+    }
     delete curr;
   }
   max_cid = commit_id + 1;
@@ -262,6 +266,7 @@ void InsertTupleHelper(oid_t &max_tg, cid_t commit_id, oid_t db_id, oid_t table_
     if (max_tg < insert_loc.block) {
 	max_tg = insert_loc.block;
     }
+
   }
 
   tile_group->InsertTupleFromRecovery(commit_id, insert_loc.offset, tuple);
