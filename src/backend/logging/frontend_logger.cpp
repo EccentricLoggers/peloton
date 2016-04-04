@@ -257,7 +257,7 @@ void FrontendLogger::CommitTransactionRecovery(cid_t commit_id) {
   recovery_txn_table.erase(commit_id);
 }
 
-void InsertTupleHelper(oid_t &max_tg, cid_t commit_id, oid_t db_id, oid_t table_id, const ItemPointer &insert_loc, storage::Tuple* tuple){
+void InsertTupleHelper(oid_t &max_tg, cid_t commit_id, oid_t db_id, oid_t table_id, const ItemPointer &insert_loc, storage::Tuple* tuple, bool increase_count = true){
   auto &manager = catalog::Manager::GetInstance();
   auto tile_group = manager.GetTileGroup(insert_loc.block);
   storage::Database *db =
@@ -276,6 +276,9 @@ void InsertTupleHelper(oid_t &max_tg, cid_t commit_id, oid_t db_id, oid_t table_
   }
 
   tile_group->InsertTupleFromRecovery(commit_id, insert_loc.offset, tuple);
+  if (increase_count){
+      table->IncreaseNumberOfTuplesBy(1);
+  }
   delete tuple;
 }
 
@@ -295,7 +298,7 @@ void DeleteTupleHelper(oid_t &max_tg, cid_t commit_id, oid_t db_id, oid_t table_
       max_tg = delete_loc.block;
     }
   }
-
+  table->DecreaseNumberOfTuplesBy(1);
   tile_group->DeleteTupleFromRecovery(commit_id, delete_loc.offset);
 }
 
@@ -315,7 +318,7 @@ void UpdateTupleHelper(oid_t &max_tg, cid_t commit_id, oid_t db_id, oid_t table_
       max_tg = remove_loc.block;
     }
   }
-  InsertTupleHelper(max_tg, commit_id, db_id, table_id, insert_loc, tuple);
+  InsertTupleHelper(max_tg, commit_id, db_id, table_id, insert_loc, tuple, false);
 
   tile_group->UpdateTupleFromRecovery(commit_id, remove_loc.offset, insert_loc);
 }
