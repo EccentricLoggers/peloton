@@ -1,14 +1,14 @@
-/*-------------------------------------------------------------------------
- *
- * frontendlogger.cpp
- * file description
- *
- * Copyright(c) 2015, CMU
- *
- * /peloton/src/backend/logging/frontendlogger.cpp
- *
- *-------------------------------------------------------------------------
- */
+//===----------------------------------------------------------------------===//
+//
+//                         Peloton
+//
+// frontend_logger.cpp
+//
+// Identification: src/backend/logging/frontend_logger.cpp
+//
+// Copyright (c) 2015-16, Carnegie Mellon University Database Group
+//
+//===----------------------------------------------------------------------===//
 
 #include <thread>
 
@@ -33,7 +33,8 @@ extern int64_t peloton_wait_timeout;
 namespace peloton {
 namespace logging {
 
-FrontendLogger::FrontendLogger() : checkpoint(CheckpointFactory::GetInstance()) {
+FrontendLogger::FrontendLogger()
+    : checkpoint(CheckpointFactory::GetInstance()) {
   logger_type = LOGGER_TYPE_FRONTEND;
 
   // Set wait timeout
@@ -89,7 +90,9 @@ void FrontendLogger::MainLoop(void) {
       /////////////////////////////////////////////////////////////////////
 
       // First, do recovery if needed
+      LOG_INFO("Log manager: Invoking DoRecovery");
       DoRecovery();
+      LOG_INFO("Log manager: DoRecovery done");
 
       // Now, enter LOGGING mode
       log_manager.SetLoggingStatus(LOGGING_STATUS_TYPE_LOGGING);
@@ -112,9 +115,11 @@ void FrontendLogger::MainLoop(void) {
   // Periodically, wake up and do logging
   while (log_manager.GetStatus() == LOGGING_STATUS_TYPE_LOGGING) {
     // Collect LogRecords from all backend loggers
+    // LOG_INFO("Log manager: Invoking CollectLogRecordsFromBackendLoggers");
     CollectLogRecordsFromBackendLoggers();
 
     // Flush the data to the file
+    // LOG_INFO("Log manager: Invoking FlushLogRecords");
     FlushLogRecords();
   }
 
@@ -168,6 +173,7 @@ void FrontendLogger::CollectLogRecordsFromBackendLoggers() {
       // Shallow copy the log record from backend_logger to here
       for (oid_t log_record_itr = 0; log_record_itr < local_queue_size;
            log_record_itr++) {
+        LOG_INFO("Found a log record to push in global queue");
         global_queue.push_back(backend_logger->GetLogRecord(log_record_itr));
       }
 

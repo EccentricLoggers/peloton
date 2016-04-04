@@ -28,8 +28,6 @@
 #include "backend/executor/executor_context.h"
 #include "backend/planner/seq_scan_plan.h"
 #include "backend/catalog/manager.h"
-#include "backend/storage/tile.h"
-#include "backend/storage/database.h"
 
 #include "backend/common/logger.h"
 #include "backend/common/types.h"
@@ -53,15 +51,16 @@ LogRecordType GetNextLogRecordType(FILE *log_file, size_t log_file_size);
 
 int ExtractNumberFromFileName(const char *name);
 
-// bool ReadTransactionRecordHeader(TransactionRecord &txn_record, FILE
-// *log_file,
-//                                 size_t log_file_size);
+bool ReadTransactionRecordHeader(TransactionRecord &txn_record, FILE *log_file,
+                                 size_t log_file_size);
 
 bool ReadTupleRecordHeader(TupleRecord &tuple_record, FILE *log_file,
                            size_t log_file_size);
 
 storage::Tuple *ReadTupleRecordBody(catalog::Schema *schema, VarlenPool *pool,
                                     FILE *log_file, size_t log_file_size);
+
+void SkipTupleRecordBody(FILE *log_file, size_t log_file_size);
 
 // Wrappers
 storage::DataTable *GetTable(TupleRecord tupleRecord);
@@ -72,6 +71,21 @@ storage::DataTable *GetTable(TupleRecord tupleRecord);
 SimpleCheckpoint &SimpleCheckpoint::GetInstance() {
   static SimpleCheckpoint simple_checkpoint;
   return simple_checkpoint;
+}
+
+SimpleCheckpoint::SimpleCheckpoint() : Checkpoint() {
+  if (peloton_checkpoint_mode != CHECKPOINT_TYPE_NORMAL) {
+    return;
+  }
+  InitDirectory();
+  InitVersionNumber();
+}
+
+SimpleCheckpoint::~SimpleCheckpoint() {
+  for (auto &record : records_) {
+    record.reset();
+  }
+  records_.clear();
 }
 
 void SimpleCheckpoint::Init() {
@@ -94,7 +108,7 @@ void SimpleCheckpoint::DoCheckpoint() {
     // build executor context
     std::unique_ptr<concurrency::Transaction> txn(
         txn_manager.BeginTransaction());
-    start_commit_id = txn->GetStartCommitId();
+    start_commit_id = txn->GetBeginCommitId();
     assert(txn);
     assert(txn.get());
     LOG_TRACE("Txn ID = %lu, Start commit id = %lu ", txn->GetTransactionId(),
@@ -110,12 +124,11 @@ void SimpleCheckpoint::DoCheckpoint() {
     bool failure = false;
 
     // Add txn begin record
-    // TODO include commit id in record
-    // LogRecord *begin_record =
-    //    new TransactionRecord(LOGRECORD_TYPE_TRANSACTION_BEGIN);
-    // CopySerializeOutput begin_output_buffer;
-    // begin_record->Serialize(begin_output_buffer);
-    // records_.push_back(begin_record);
+    std::shared_ptr<LogRecord> begin_record(new TransactionRecord(
+        LOGRECORD_TYPE_TRANSACTION_BEGIN, start_commit_id));
+    CopySerializeOutput begin_output_buffer;
+    begin_record->Serialize(begin_output_buffer);
+    records_.push_back(begin_record);
 
     for (oid_t database_idx = 0; database_idx < database_count && !failure;
          database_idx++) {
@@ -132,7 +145,6 @@ void SimpleCheckpoint::DoCheckpoint() {
 
         auto schema = target_table->GetSchema();
         assert(schema);
-        expression::AbstractExpression *predicate = nullptr;
         std::vector<oid_t> column_ids;
         column_ids.resize(schema->GetColumnCount());
         std::iota(column_ids.begin(), column_ids.end(), 0);
@@ -140,7 +152,7 @@ void SimpleCheckpoint::DoCheckpoint() {
         /* Construct the Peloton plan node */
         LOG_TRACE("Initializing the executor tree");
         std::unique_ptr<planner::SeqScanPlan> scan_plan_node(
-            new planner::SeqScanPlan(target_table, predicate, column_ids));
+            new planner::SeqScanPlan(target_table, nullptr, column_ids));
         std::unique_ptr<executor::SeqScanExecutor> scan_executor(
             new executor::SeqScanExecutor(scan_plan_node.get(),
                                           executor_context.get()));
@@ -150,11 +162,11 @@ void SimpleCheckpoint::DoCheckpoint() {
         }
       }
     }
+
     // if anything other than begin record is added
-    // TODO change to 1
-    if (records_.size() > 0) {
-      LogRecord *commit_record =
-          new TransactionRecord(LOGRECORD_TYPE_TRANSACTION_COMMIT);
+    if (records_.size() > 1) {
+      std::shared_ptr<LogRecord> commit_record(new TransactionRecord(
+          LOGRECORD_TYPE_TRANSACTION_COMMIT, start_commit_id));
       CopySerializeOutput commit_output_buffer;
       commit_record->Serialize(commit_output_buffer);
       records_.push_back(commit_record);
@@ -174,7 +186,7 @@ bool SimpleCheckpoint::DoRecovery() {
   if (checkpoint_version < 0) {
     return false;
   }
-  std::string file_name = ConcatFileName(checkpoint_version);
+  std::string file_name = ConcatFileName(checkpoint_dir, checkpoint_version);
   checkpoint_file_ = fopen(file_name.c_str(), "rb");
 
   if (checkpoint_file_ == NULL) {
@@ -192,37 +204,51 @@ bool SimpleCheckpoint::DoRecovery() {
   checkpoint_file_size_ = GetLogFileSize(checkpoint_file_fd_);
   assert(checkpoint_file_size_ > 0);
   bool should_stop = false;
+  cid_t commit_id = 0;
   while (!should_stop) {
     auto record_type =
         GetNextLogRecordType(checkpoint_file_, checkpoint_file_size_);
     switch (record_type) {
-      case LOGRECORD_TYPE_WAL_TUPLE_INSERT:
+      case LOGRECORD_TYPE_WAL_TUPLE_INSERT: {
         LOG_INFO("Read checkpoint insert entry");
-        InsertTuple();
+        InsertTuple(commit_id);
         break;
-      case LOGRECORD_TYPE_TRANSACTION_COMMIT:
+      }
+      case LOGRECORD_TYPE_TRANSACTION_COMMIT: {
         should_stop = true;
         break;
-      case LOGRECORD_TYPE_TRANSACTION_BEGIN:
-        // TODO also check txn begin record
+      }
+      case LOGRECORD_TYPE_TRANSACTION_BEGIN: {
         LOG_INFO("Read checkpoint begin entry");
+        TransactionRecord txn_rec(record_type);
+        if (ReadTransactionRecordHeader(txn_rec, checkpoint_file_,
+                                        checkpoint_file_size_) == false) {
+          LOG_ERROR("Failed to read checkpoint begin entry");
+          return false;
+        }
+        commit_id = txn_rec.GetTransactionId();
         break;
-      default:
+      }
+      default: {
         LOG_ERROR("Invalid checkpoint entry");
         should_stop = true;
         break;
+      }
     }
   }
 
   // After finishing recovery, set the next oid with maximum oid
   // observed during the recovery
   auto &manager = catalog::Manager::GetInstance();
-  manager.SetNextOid(max_oid_);
+  if (max_oid_ > manager.GetNextOid()) {
+    manager.SetNextOid(max_oid_);
+  }
 
+  concurrency::TransactionManagerFactory::GetInstance().SetNextCid(commit_id);
   return true;
 }
 
-void SimpleCheckpoint::InsertTuple() {
+void SimpleCheckpoint::InsertTuple(cid_t commit_id) {
   TupleRecord tuple_record(LOGRECORD_TYPE_WAL_TUPLE_INSERT);
 
   // Check for torn log write
@@ -233,11 +259,15 @@ void SimpleCheckpoint::InsertTuple() {
   }
 
   auto table = GetTable(tuple_record);
+  if (!table) {
+    // the table was deleted
+    SkipTupleRecordBody(checkpoint_file_, checkpoint_file_size_);
+    return;
+  }
 
   // Read off the tuple record body from the log
-  auto tuple = ReadTupleRecordBody(table->GetSchema(), pool.get(),
-                                   checkpoint_file_, checkpoint_file_size_);
-
+  std::unique_ptr<storage::Tuple> tuple(ReadTupleRecordBody(
+      table->GetSchema(), pool.get(), checkpoint_file_, checkpoint_file_size_));
   // Check for torn log write
   if (tuple == nullptr) {
     LOG_ERROR("Torn checkpoint write.");
@@ -246,31 +276,10 @@ void SimpleCheckpoint::InsertTuple() {
 
   auto target_location = tuple_record.GetInsertLocation();
   auto tile_group_id = target_location.block;
-  auto tuple_slot = target_location.offset;
-
-  auto &manager = catalog::Manager::GetInstance();
-  auto tile_group = manager.GetTileGroup(tile_group_id);
-
-  // Create new tile group if table doesn't already have that tile group
-  if (tile_group == nullptr) {
-    table->AddTileGroupWithOid(tile_group_id);
-    tile_group = manager.GetTileGroup(tile_group_id);
-    if (max_oid_ < tile_group_id) {
-      max_oid_ = tile_group_id;
-    }
+  RecoverTuple(tuple.get(), table, target_location, commit_id);
+  if (max_oid_ < target_location.block) {
+    max_oid_ = tile_group_id;
   }
-
-  // Do the insert!
-  auto inserted_tuple_slot =
-      tile_group->InsertTupleFromCheckpoint(tuple_slot, tuple);
-
-  if (inserted_tuple_slot == INVALID_OID) {
-    // TODO: We need to abort on failure!
-  } else {
-    // txn->RecordInsert(target_location);
-    table->SetNumberOfTuples(table->GetNumberOfTuples() + 1);
-  }
-  delete tuple;
 }
 
 bool SimpleCheckpoint::Execute(executor::AbstractExecutor *scan_executor,
@@ -321,14 +330,15 @@ bool SimpleCheckpoint::Execute(executor::AbstractExecutor *scan_executor,
         }
         ItemPointer location(tile_group_id, tuple_id);
         assert(logger_);
-        auto record = logger_->GetTupleRecord(
+        std::shared_ptr<LogRecord> record(logger_->GetTupleRecord(
             LOGRECORD_TYPE_TUPLE_INSERT, txn->GetTransactionId(),
             target_table->GetOid(), location, INVALID_ITEMPOINTER, tuple.get(),
-            database_oid);
+            database_oid));
         assert(record);
         CopySerializeOutput output_buffer;
         record->Serialize(output_buffer);
-        LOG_INFO("Insert a new record for checkpoint");
+        LOG_TRACE("Insert a new record for checkpoint (%lu, %lu)",
+                  tile_group_id, tuple_id);
         records_.push_back(record);
       }
     }
@@ -337,13 +347,15 @@ bool SimpleCheckpoint::Execute(executor::AbstractExecutor *scan_executor,
 }
 void SimpleCheckpoint::SetLogger(BackendLogger *logger) { logger_ = logger; }
 
-std::vector<LogRecord *> SimpleCheckpoint::GetRecords() { return records_; }
+std::vector<std::shared_ptr<LogRecord>> SimpleCheckpoint::GetRecords() {
+  return records_;
+}
 
 // Private Functions
 
 void SimpleCheckpoint::CreateFile() {
   // open checkpoint file and file descriptor
-  std::string file_name = ConcatFileName(++checkpoint_version);
+  std::string file_name = ConcatFileName(checkpoint_dir, ++checkpoint_version);
   checkpoint_file_ = fopen(file_name.c_str(), "ab+");
   if (checkpoint_file_ == NULL) {
     LOG_ERROR("Checkpoint File is NULL");
@@ -360,8 +372,7 @@ void SimpleCheckpoint::CreateFile() {
 // Only called when checkpoint has actual contents
 void SimpleCheckpoint::Persist() {
   assert(checkpoint_file_);
-  // TODO change to 2
-  assert(records_.size() > 1);
+  assert(records_.size() > 2);
   assert(checkpoint_file_fd_ != INVALID_FILE_DESCRIPTOR);
 
   LOG_INFO("Persisting %lu checkpoint entries", records_.size());
@@ -389,15 +400,19 @@ void SimpleCheckpoint::Persist() {
 void SimpleCheckpoint::Cleanup() {
   // Clean up the record queue
   for (auto record : records_) {
-    delete record;
+    record.reset();
   }
   records_.clear();
 
   // Remove previous version
-  auto previous_version = ConcatFileName(checkpoint_version - 1).c_str();
-  if (remove(previous_version) != 0) {
-    LOG_INFO("Failed to remove file %s", previous_version);
+  if (checkpoint_version > 0) {
+    auto previous_version =
+        ConcatFileName(checkpoint_dir, checkpoint_version - 1).c_str();
+    if (remove(previous_version) != 0) {
+      LOG_INFO("Failed to remove file %s", previous_version);
+    }
   }
+
   // Truncate logs
   auto frontend_logger = LogManager::GetInstance().GetFrontendLogger();
   assert(frontend_logger);
@@ -408,26 +423,23 @@ void SimpleCheckpoint::Cleanup() {
 void SimpleCheckpoint::InitVersionNumber() {
   // Get checkpoint version
   LOG_INFO("Trying to read checkpoint directory");
-  struct dirent **list;
-
-  // TODO create sub-directory for checkpoint
-  int num_file = scandir(".", &list, 0, alphasort);
-  if (num_file < 0) {
-    LOG_INFO("scandir failed: Errno: %d, error: %s", errno, strerror(errno));
+  struct dirent *file;
+  auto dirp = opendir(checkpoint_dir.c_str());
+  if (dirp == nullptr) {
+    LOG_INFO("Opendir failed: Errno: %d, error: %s", errno, strerror(errno));
     return;
   }
-
-  // Get the max version
-  for (int i = 0; i < num_file; i++) {
-    if (strncmp(list[i]->d_name, FILE_PREFIX.c_str(), FILE_PREFIX.length()) ==
-        0) {
-      LOG_INFO("Found a checkpoint file with name %s", list[i]->d_name);
-      int version = ExtractNumberFromFileName(list[i]->d_name);
+  while ((file = readdir(dirp)) != NULL) {
+    if (strncmp(file->d_name, FILE_PREFIX.c_str(), FILE_PREFIX.length()) == 0) {
+      // found a checkpoint file!
+      LOG_INFO("Found a checkpoint file with name %s", file->d_name);
+      int version = ExtractNumberFromFileName(file->d_name);
       if (version > checkpoint_version) {
         checkpoint_version = version;
       }
     }
   }
+  closedir(dirp);
   LOG_INFO("set checkpoint version to: %d", checkpoint_version);
 }
 

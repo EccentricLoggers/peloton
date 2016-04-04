@@ -1,14 +1,14 @@
-/*-------------------------------------------------------------------------
- *
- * wal_frontend_logger.h
- * file description
- *
- * Copyright(c) 2015, CMU
- *
- * /peloton/src/backend/logging/wal_frontend_logger.h
- *
- *-------------------------------------------------------------------------
- */
+//===----------------------------------------------------------------------===//
+//
+//                         Peloton
+//
+// wal_frontend_logger.h
+//
+// Identification: src/backend/logging/loggers/wal_frontend_logger.h
+//
+// Copyright (c) 2015-16, Carnegie Mellon University Database Group
+//
+//===----------------------------------------------------------------------===//
 
 #pragma once
 
@@ -29,7 +29,6 @@ class Transaction;
 
 namespace logging {
 
-
 //===--------------------------------------------------------------------===//
 // Write Ahead Frontend Logger
 //===--------------------------------------------------------------------===//
@@ -37,6 +36,8 @@ namespace logging {
 class WriteAheadFrontendLogger : public FrontendLogger {
  public:
   WriteAheadFrontendLogger(void);
+
+  WriteAheadFrontendLogger(bool for_testing);
 
   ~WriteAheadFrontendLogger(void);
 
@@ -60,7 +61,15 @@ class WriteAheadFrontendLogger : public FrontendLogger {
 
   LogRecordType GetNextLogRecordTypeForRecovery(FILE *, size_t);
 
-  void TruncateLog(int);
+  void TruncateLog(txn_id_t);
+
+  void SetLogDirectory(char *);
+
+  void InitLogDirectory();
+
+  std::string GetFileNameFromVersion(int);
+
+  txn_id_t ExtractMaxCommitIdFromLogFileRecords(FILE *);
 
  private:
   std::string GetLogFileName(void);
@@ -88,6 +97,16 @@ class WriteAheadFrontendLogger : public FrontendLogger {
 
   networking::RpcChannel *channel_ =  new networking::RpcChannel("127.0.0.1:9000");
   networking::RpcController *controller_ = new networking::RpcController();
+  //for recovery from in memory buffer instead of file.
+  char * input_log_buffer;
+
+  std::string peloton_log_directory = "peloton_log";
+
+  std::string LOG_FILE_PREFIX = "peloton_log_";
+
+  std::string LOG_FILE_SUFFIX = ".log";
+
+  txn_id_t max_commit_id;
 };
 
 }  // namespace logging
