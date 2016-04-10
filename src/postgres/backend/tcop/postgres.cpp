@@ -4258,8 +4258,28 @@ PostgresMain(int argc, char *argv[],
          */
       case 'X':
       case EOF:
-
+	{
         // TODO: Peloton Changes
+	// wait for log to flush and return remaining messages
+	printf("before flushing waiting messages");
+	peloton::logging::LogManager &manager = peloton::logging::LogManager::GetInstance();
+	std::map<peloton::cid_t, std::vector<StringInfo>> &pending_messages = *manager.GetPendingMessages();
+	// flush old pending messages
+	peloton::cid_t current_flushed_time = manager.GetMaxFlushedCommitId();
+	for(auto it = pending_messages.begin(); it!=pending_messages.end(); it++){
+	    manager.WaitForFlush(it->first);
+	    for(auto it2 = it->second.begin(); it2 != it->second.end(); it2++){
+		StringInfo &currBuf = *it2;
+		printf("flushing buffer");
+		(void) pq_putmessage(currBuf->cursor, currBuf->data, currBuf->len);
+		/* no need to complain about any failure, since pqcomm.c already did */
+		pfree(currBuf->data);
+		currBuf->data = NULL;
+	    }
+	    pending_messages.erase(it->first);
+	}
+	pq_flush();
+
         if(IsPostmasterEnvironment == true)
         {
           MemoryContextDelete(MessageContext);
@@ -4281,7 +4301,8 @@ PostgresMain(int argc, char *argv[],
          * scenarios.
          */
         proc_exit(0);
-
+	break;
+	}
       case 'd':			/* copy data */
       case 'c':			/* copy done */
       case 'f':			/* copy fail */

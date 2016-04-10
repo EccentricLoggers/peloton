@@ -77,6 +77,9 @@
 #include "libpq/libpq.h"
 #include "libpq/pqformat.h"
 #include "mb/pg_wchar.h"
+//Added for peloton
+#include <backend/logging/log_manager.h>
+#include <backend/common/types.h>
 
 
 /* --------------------------------
@@ -342,15 +345,42 @@ pq_sendfloat8(StringInfo buf, float8 f)
 void
 pq_endmessage(StringInfo buf)
 {
-	/* msgtype was saved in cursor field */
-	(void) pq_putmessage(buf->cursor, buf->data, buf->len);
-
-	// TODO: Peloton Changes
-	//printf("Message :: len : %d data : -%s- \n", buf->len, buf->data);
-
+  /* msgtype was saved in cursor field */
+  peloton::logging::LogManager &manager = peloton::logging::LogManager::GetInstance();
+  std::map<peloton::cid_t, std::vector<StringInfo>> &pending_messages = *manager.GetPendingMessages();
+  // flush old pending messages
+  peloton::cid_t current_flushed_time = manager.GetMaxFlushedCommitId();
+  if (pending_messages.size() > 0){
+    for(auto it = pending_messages.begin(); it!=pending_messages.end(); it++){
+      if (it->first > current_flushed_time){
+	break;
+      }
+      for(auto it2 = it->second.begin(); it2 != it->second.end(); it2++){
+	StringInfo &currBuf = *it2;
+	(void) pq_putmessage(currBuf->cursor, currBuf->data, currBuf->len);
 	/* no need to complain about any failure, since pqcomm.c already did */
-	pfree(buf->data);
-	buf->data = NULL;
+	pfree(currBuf->data);
+	currBuf->data = NULL;
+      }
+      pending_messages.erase(it->first);
+    }
+    pq_flush();
+  }
+  peloton::cid_t current_cid = manager.GetCurrentCid();
+  if(current_cid != 0 && current_cid > current_flushed_time){
+    if(pending_messages.count(current_cid) == 0){
+      std::vector<StringInfo> new_flush;
+      pending_messages[current_cid] = new_flush;
+    }
+    pending_messages[current_cid].push_back(buf);
+  }else{
+    (void) pq_putmessage(buf->cursor, buf->data, buf->len);
+    /* no need to complain about any failure, since pqcomm.c already did */
+    pfree(buf->data);
+    buf->data = NULL;
+  }
+  // TODO: Peloton Changes
+  //printf("Message :: len : %d data : -%s- \n", buf->len, buf->data);
 }
 
 

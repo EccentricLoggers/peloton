@@ -31,6 +31,10 @@ namespace logging {
 // Each thread gets a backend logger
 thread_local static BackendLogger *backend_logger = nullptr;
 
+thread_local static std::map<cid_t, std::vector<StringInfo>> pending_messages;
+
+thread_local static cid_t current_commit_id = 0;
+
 LogManager::LogManager() {}
 
 LogManager::~LogManager() {}
@@ -205,12 +209,13 @@ void LogManager::LogDelete(cid_t commit_id, ItemPointer &delete_location) {
 }
 
 void LogManager::LogCommitTransaction(cid_t commit_id) {
+  current_commit_id = commit_id;
   if (this->IsInLoggingMode()) {
     auto logger = this->GetBackendLogger();
     auto record =
         new TransactionRecord(LOGRECORD_TYPE_TRANSACTION_COMMIT, commit_id);
     logger->Log(record);
-    WaitForFlush(commit_id);
+//    WaitForFlush(commit_id);
   }
 }
 
@@ -239,6 +244,14 @@ BackendLogger *LogManager::GetBackendLogger() {
  */
 FrontendLogger *LogManager::GetFrontendLogger() {
   return frontend_logger.get();
+}
+
+std::map<cid_t, std::vector<StringInfo>> * LogManager::GetPendingMessages(){
+  return &pending_messages;
+}
+
+cid_t LogManager::GetCurrentCid(){
+  return current_commit_id;
 }
 
 bool LogManager::ContainsFrontendLogger(void) {
@@ -281,7 +294,11 @@ void LogManager::ResetFrontendLogger() {
 }
 
 cid_t LogManager::GetMaxFlushedCommitId() {
-  return frontend_logger->GetMaxFlushedCommitId();
+  if (frontend_logger == nullptr){
+    return MAX_CID;
+  }else{
+    return frontend_logger->GetMaxFlushedCommitId();
+  }
 }
 
 void LogManager::FrontendLoggerFlushed() {

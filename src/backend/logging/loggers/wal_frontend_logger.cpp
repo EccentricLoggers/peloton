@@ -16,6 +16,7 @@
 #include <sys/mman.h>
 #include <algorithm>
 #include <dirent.h>
+#include <unistd.h>
 
 #include "backend/catalog/manager.h"
 #include "backend/catalog/schema.h"
@@ -159,7 +160,7 @@ void WriteAheadFrontendLogger::FlushLogRecords(void) {
   if (global_queue.size() != 0 && this->log_file_fd == -1) {
     this->CreateNewLogFile(false);
   }
-
+  sleep(5);
   size_t global_queue_size = global_queue.size();
   bool write_del = false;
   for (oid_t global_queue_itr = 0; global_queue_itr < global_queue_size;

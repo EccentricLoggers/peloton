@@ -20,6 +20,7 @@
 #include "backend_logger.h"
 #include "frontend_logger.h"
 #include "backend/concurrency/transaction.h"
+#include "postgres/include/lib/stringinfo.h"
 
 //===--------------------------------------------------------------------===//
 // GUC Variables
@@ -29,6 +30,8 @@ extern LoggingType peloton_logging_mode;
 
 namespace peloton {
 namespace logging {
+
+
 
 //===--------------------------------------------------------------------===//
 // Log Manager
@@ -103,6 +106,10 @@ class LogManager {
   bool HasPelotonFrontendLogger() const {
     return (peloton_logging_mode == LOGGING_TYPE_NVM_NVM);
   }
+
+  std::map<cid_t, std::vector<StringInfo>> * GetPendingMessages();
+
+  cid_t GetCurrentCid();
 
   //===--------------------------------------------------------------------===//
   // Utility Functions
