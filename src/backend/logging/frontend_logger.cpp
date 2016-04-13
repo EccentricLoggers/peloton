@@ -49,20 +49,20 @@ FrontendLogger::~FrontendLogger() {
 }
 
 /** * @brief Return the frontend logger based on logging type
- * @param logging type can be stdout(debug), aries, peloton
+ * @param logging type can be write ahead logging or write behind logging
  */
 FrontendLogger *FrontendLogger::GetFrontendLogger(LoggingType logging_type) {
-  FrontendLogger *frontendLogger = nullptr;
+  FrontendLogger *frontend_logger = nullptr;
 
   if (IsBasedOnWriteAheadLogging(logging_type) == true) {
-    frontendLogger = new WriteAheadFrontendLogger();
+    frontend_logger = new WriteAheadFrontendLogger();
   } else if (IsBasedOnWriteBehindLogging(logging_type) == true) {
-    frontendLogger = new WriteBehindFrontendLogger();
+    frontend_logger = new WriteBehindFrontendLogger();
   } else {
     LOG_ERROR("Unsupported logging type");
   }
 
-  return frontendLogger;
+  return frontend_logger;
 }
 
 /**
@@ -75,13 +75,13 @@ void FrontendLogger::MainLoop(void) {
   // STANDBY MODE
   /////////////////////////////////////////////////////////////////////
 
-  LOG_TRACE("Frontendlogger] Standby Mode");
+  LOG_TRACE("FrontendLogger Standby Mode");
 
   // Standby before we need to do RECOVERY
-  log_manager.WaitForMode(LOGGING_STATUS_TYPE_STANDBY, false);
+  log_manager.WaitForModeTransition(LOGGING_STATUS_TYPE_STANDBY, false);
 
   // Do recovery if we can, otherwise terminate
-  switch (log_manager.GetStatus()) {
+  switch (log_manager.GetLoggingStatus()) {
     case LOGGING_STATUS_TYPE_RECOVERY: {
       LOG_TRACE("Frontendlogger] Recovery Mode");
 
@@ -113,7 +113,7 @@ void FrontendLogger::MainLoop(void) {
   /////////////////////////////////////////////////////////////////////
 
   // Periodically, wake up and do logging
-  while (log_manager.GetStatus() == LOGGING_STATUS_TYPE_LOGGING) {
+  while (log_manager.GetLoggingStatus() == LOGGING_STATUS_TYPE_LOGGING) {
     // Collect LogRecords from all backend loggers
     // LOG_INFO("Log manager: Invoking CollectLogRecordsFromBackendLoggers");
     CollectLogRecordsFromBackendLoggers();
@@ -127,9 +127,6 @@ void FrontendLogger::MainLoop(void) {
   // TERMINATE MODE
   /////////////////////////////////////////////////////////////////////
 
-  // force the last check to be done without waiting
-  need_to_collect_new_log_records = true;
-
   // flush any remaining log records
   CollectLogRecordsFromBackendLoggers();
   FlushLogRecords();
@@ -138,7 +135,7 @@ void FrontendLogger::MainLoop(void) {
   // SLEEP MODE
   /////////////////////////////////////////////////////////////////////
 
-  LOG_TRACE("Frontendlogger] Sleep Mode");
+  LOG_TRACE("Frontendlogger Sleep Mode");
 
   // Setting frontend logger status to sleep
   log_manager.SetLoggingStatus(LOGGING_STATUS_TYPE_SLEEP);
@@ -148,81 +145,83 @@ void FrontendLogger::MainLoop(void) {
  * @brief Collect the log records from BackendLoggers
  */
 void FrontendLogger::CollectLogRecordsFromBackendLoggers() {
-  /*
-   * Don't use "while(!need_to_collect_new_log_records)",
-   * we want the frontend check all backend periodically even no backend
-   * notifies.
-   * So that large txn can submit its log records piece by piece
-   * instead of a huge submission when the txn is committed.
-   */
-  if (need_to_collect_new_log_records == false) {
-    auto sleep_period = std::chrono::microseconds(wait_timeout);
-    std::this_thread::sleep_for(sleep_period);
-  }
+  auto sleep_period = std::chrono::microseconds(wait_timeout);
+  std::this_thread::sleep_for(sleep_period);
 
   {
-    std::lock_guard<std::mutex> lock(backend_logger_mutex);
+    cid_t max_possible_commit_id = MAX_CID;
+
+    // TODO: handle edge cases here (backend logger has not yet sent a log
+    // message)
 
     // Look at the local queues of the backend loggers
+    while (backend_loggers_lock.test_and_set(std::memory_order_acquire))
+      ;
     for (auto backend_logger : backend_loggers) {
-      auto local_queue_size = backend_logger->GetLocalQueueSize();
+      {
+        auto &log_buffers = backend_logger->CollectLogBuffers();
+        auto log_buffer_size = log_buffers.size();
 
-      // Skip current backend_logger, nothing to do
-      if (local_queue_size == 0) continue;
+        // Skip current backend_logger, nothing to do
+        if (log_buffer_size == 0) continue;
 
-      // Shallow copy the log record from backend_logger to here
-      for (oid_t log_record_itr = 0; log_record_itr < local_queue_size;
-           log_record_itr++) {
-        LOG_INFO("Found a log record to push in global queue");
-        global_queue.push_back(backend_logger->GetLogRecord(log_record_itr));
+        // Move the log record from backend_logger to here
+        for (oid_t log_record_itr = 0; log_record_itr < log_buffer_size;
+             log_record_itr++) {
+          // copy to front end logger
+          auto cid = log_buffers[log_record_itr]->GetHighestCommitId();
+          LOG_INFO("Found a log buffer to push with commit id: %lu", cid);
+          global_queue.push_back(std::move(log_buffers[log_record_itr]));
+
+          //update max_possible_commit_id with the latest buffer
+          if (log_record_itr == log_buffer_size - 1 && cid != INVALID_CID) {
+            max_possible_commit_id = std::min(cid, max_possible_commit_id);
+          }
+        }
+        // cleanup the local queue
+        log_buffers.clear();
       }
-
-      // truncate the local queue
-      backend_logger->TruncateLocalQueue(local_queue_size);
     }
-  }
 
-  need_to_collect_new_log_records = false;
+    if (max_possible_commit_id != MAX_CID) {
+      assert(max_possible_commit_id >= max_collected_commit_id);
+      max_collected_commit_id = max_possible_commit_id;
+    }
+    backend_loggers_lock.clear(std::memory_order_release);
+  }
+}
+
+cid_t FrontendLogger::GetMaxFlushedCommitId() { return max_flushed_commit_id; }
+
+void FrontendLogger::SetBackendLoggerLoggedCid(BackendLogger &bel) {
+  while (backend_loggers_lock.test_and_set(std::memory_order_acquire))
+    ;
+  bel.SetHighestLoggedCommitId(max_collected_commit_id);
+  backend_loggers_lock.clear(std::memory_order_release);
 }
 
 /**
- * @brief Store backend logger
+ * @brief Add backend logger to the list of backend loggers
  * @param backend logger
  */
 void FrontendLogger::AddBackendLogger(BackendLogger *backend_logger) {
-  {
-    std::lock_guard<std::mutex> lock(backend_logger_mutex);
-    backend_loggers.push_back(backend_logger);
-    backend_logger->SetConnectedToFrontend(true);
+  // Grant empty buffers
+  for (int i = 0; i < BUFFER_POOL_SIZE; i++) {
+    std::unique_ptr<LogBuffer> buffer(new LogBuffer(backend_logger));
+    backend_logger->GrantEmptyBuffer(std::move(buffer));
   }
-}
-
-bool FrontendLogger::RemoveBackendLogger(BackendLogger *_backend_logger) {
-  {
-    std::lock_guard<std::mutex> lock(backend_logger_mutex);
-    oid_t offset = 0;
-
-    for (auto backend_logger : backend_loggers) {
-      if (backend_logger == _backend_logger) {
-        backend_logger->SetConnectedToFrontend(false);
-        break;
-      } else {
-        offset++;
-      }
-    }
-
-    assert(offset < backend_loggers.size());
-    backend_loggers.erase(backend_loggers.begin() + offset);
-  }
-
-  return true;
+  // Add backend logger to the list of backend loggers
+  while (backend_loggers_lock.test_and_set(std::memory_order_acquire));
+  backend_logger->SetHighestLoggedCommitId(max_collected_commit_id);
+  backend_loggers.push_back(backend_logger);
+  backend_loggers_lock.clear(std::memory_order_release);
 }
 
 /**
  * @brief Add new txn to recovery table
  */
 void FrontendLogger::StartTransactionRecovery(cid_t commit_id) {
-  std::vector<TupleRecord*> tuple_recs;
+  std::vector<TupleRecord *> tuple_recs;
   recovery_txn_table[commit_id] = tuple_recs;
 }
 

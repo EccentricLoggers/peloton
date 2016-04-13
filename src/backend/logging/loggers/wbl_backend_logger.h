@@ -12,6 +12,7 @@
 
 #pragma once
 
+#include "backend/common/types.h"
 #include "backend/logging/backend_logger.h"
 
 namespace peloton {
@@ -29,19 +30,29 @@ class WriteBehindBackendLogger : public BackendLogger {
   WriteBehindBackendLogger(WriteBehindBackendLogger &&) = delete;
   WriteBehindBackendLogger &operator=(WriteBehindBackendLogger &&) = delete;
 
-  static WriteBehindBackendLogger *GetInstance(void);
+  WriteBehindBackendLogger() { logging_type = LOGGING_TYPE_NVM_NVM; }
 
   void Log(LogRecord *record);
 
   void TruncateLocalQueue(oid_t offset);
 
   LogRecord *GetTupleRecord(LogRecordType log_record_type, txn_id_t txn_id,
-                            oid_t table_oid, ItemPointer insert_location,
-                            ItemPointer delete_location, void *data = nullptr,
-                            oid_t db_oid = INVALID_OID);
+                            oid_t table_oid,
+                            oid_t db_oid,
+                            ItemPointer insert_location,
+                            ItemPointer delete_location, void *data = nullptr);
+
+
+  //FIXME temporarily defined for wbl_backend_logger to compile code
+   std::vector<std::unique_ptr<LogBuffer>> &CollectLogBuffers() {
+	  return local_queue;
+  }
+
+   void GrantEmptyBuffer(__attribute__((unused)) std::unique_ptr<LogBuffer>) {
+ 	  //FIXME temporarily defined for wbl_backend_logger to compile code
+  }
 
  private:
-  WriteBehindBackendLogger() { logging_type = LOGGING_TYPE_NVM_NVM; }
 
   CopySerializeOutput output_buffer;
 };

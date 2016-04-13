@@ -166,9 +166,7 @@ std::string BackendTypeToString(BackendType type) {
       return "FILE";
     case (BACKEND_TYPE_INVALID):
       return "INVALID";
-    default: {
-      return "UNKNOWN " + std::to_string(type);
-    }
+    default: { return "UNKNOWN " + std::to_string(type); }
   }
   return (ret);
 }
@@ -291,7 +289,6 @@ bool IsBasedOnWriteAheadLogging(LoggingType logging_type) {
   switch (logging_type) {
     case LOGGING_TYPE_DRAM_NVM:
     case LOGGING_TYPE_DRAM_HDD:
-    case LOGGING_TYPE_DRAM_SSD:
       status = true;
       break;
 
@@ -308,15 +305,9 @@ bool IsBasedOnWriteBehindLogging(LoggingType logging_type) {
 
   switch (logging_type) {
     case LOGGING_TYPE_NVM_NVM:
-    case LOGGING_TYPE_NVM_SSD:
     case LOGGING_TYPE_NVM_HDD:
 
-    case LOGGING_TYPE_SSD_NVM:
-    case LOGGING_TYPE_SSD_SSD:
-    case LOGGING_TYPE_SSD_HDD:
-
     case LOGGING_TYPE_HDD_NVM:
-    case LOGGING_TYPE_HDD_SSD:
     case LOGGING_TYPE_HDD_HDD:
       status = true;
       break;
@@ -467,12 +458,6 @@ std::string ExpressionTypeToString(ExpressionType type) {
     }
     case EXPRESSION_TYPE_OPERATOR_COALESCE: {
       return "COALESCE";
-    }
-    case EXPRESSION_TYPE_OPERATOR_CASE_WHEN: {
-      return "OPERATOR_CASE_WHEN";
-    }
-    case EXPRESSION_TYPE_OPERATOR_ALTERNATIVE: {
-      return "OPERATOR_ALTERNATIVE";
     }
     case EXPRESSION_TYPE_ROW_SUBQUERY: {
       return "ROW_SUBQUERY";
@@ -636,10 +621,6 @@ ExpressionType StringToExpressionType(std::string str) {
     return EXPRESSION_TYPE_VALUE_VECTOR;
   } else if (str == "HASH_RANGE") {
     return EXPRESSION_TYPE_HASH_RANGE;
-  } else if (str == "OPERATOR_CASE_WHEN") {
-    return EXPRESSION_TYPE_OPERATOR_CASE_WHEN;
-  } else if (str == "OPERATOR_ALTERNATIVE") {
-    return EXPRESSION_TYPE_OPERATOR_ALTERNATIVE;
   } else if (str == "ROW_SUBQUERY") {
     return EXPRESSION_TYPE_ROW_SUBQUERY;
   } else if (str == "SELECT_SUBQUERY") {
@@ -928,34 +909,21 @@ std::string LoggingTypeToString(LoggingType type) {
       return "DRAM_NVM";
     case LOGGING_TYPE_DRAM_HDD:
       return "DRAM_HDD";
-    case LOGGING_TYPE_DRAM_SSD:
-      return "DRAM_SSD";
 
     // WBL Based
 
     case LOGGING_TYPE_NVM_NVM:
       return "NVM_NVM";
-    case LOGGING_TYPE_NVM_SSD:
-      return "NVM_SSD";
     case LOGGING_TYPE_NVM_HDD:
       return "NVM_HDD";
 
     case LOGGING_TYPE_HDD_NVM:
       return "HDD_NVM";
-    case LOGGING_TYPE_HDD_SSD:
-      return "HDD_SSD";
     case LOGGING_TYPE_HDD_HDD:
       return "HDD_HDD";
 
-    case LOGGING_TYPE_SSD_NVM:
-      return "SSD_NVM";
-    case LOGGING_TYPE_SSD_SSD:
-      return "SSD_SSD";
-    case LOGGING_TYPE_SSD_HDD:
-      return "SSD_HDD";
-
     default:
-      throw Exception("Invalid logging_type :: " + std::to_string(type));
+      LOG_ERROR("Invalid logging_type :: %d", type);
       exit(EXIT_FAILURE);
   }
   return "INVALID";
@@ -1046,6 +1014,9 @@ std::string LogRecordTypeToString(LogRecordType type) {
     }
     case LOGRECORD_TYPE_WBL_TUPLE_UPDATE: {
       return "LOGRECORD_TYPE_WBL_TUPLE_UPDATE";
+    }
+    case LOGRECORD_TYPE_ITERATION_DELIMITER: {
+      return "LOGRECORD_TYPE_ITERATION_DELIMITER";
     }
   }
   return "INVALID";

@@ -17,7 +17,12 @@
 #include "backend/logging/log_file.h"
 #include "backend/networking/rpc_channel.h"
 #include "backend/networking/rpc_controller.h"
+
+#include "backend/executor/executors.h"
+
 #include <dirent.h>
+#include <vector>
+#include <set>
 
 namespace peloton {
 
@@ -49,6 +54,9 @@ class WriteAheadFrontendLogger : public FrontendLogger {
 
   void DoRecovery(void);
 
+
+  void RecoverIndex();
+
   void AbortActiveTransactions();
 
   void InitLogFilesList();
@@ -59,7 +67,7 @@ class WriteAheadFrontendLogger : public FrontendLogger {
 
   void OpenNextLogFile();
 
-  LogRecordType GetNextLogRecordTypeForRecovery(FILE *, size_t);
+  LogRecordType GetNextLogRecordTypeForRecovery();
 
   void TruncateLog(txn_id_t);
 
@@ -73,6 +81,12 @@ class WriteAheadFrontendLogger : public FrontendLogger {
 
  private:
   std::string GetLogFileName(void);
+
+  bool RecoverIndexHelper(executor::AbstractExecutor *scan_executor,
+                          storage::DataTable *target_table);
+
+  void InsertIndexEntry(storage::Tuple *tuple, storage::DataTable *table,
+                        ItemPointer target_location);
 
   //===--------------------------------------------------------------------===//
   // Member Variables
@@ -98,15 +112,19 @@ class WriteAheadFrontendLogger : public FrontendLogger {
   networking::RpcChannel *channel_ =  new networking::RpcChannel("127.0.0.1:9000");
   networking::RpcController *controller_ = new networking::RpcController();
   //for recovery from in memory buffer instead of file.
-  char * input_log_buffer;
+  char *input_log_buffer;
 
-  std::string peloton_log_directory = "peloton_log";
+  std::string peloton_log_directory = "pl_log";
 
   std::string LOG_FILE_PREFIX = "peloton_log_";
 
   std::string LOG_FILE_SUFFIX = ".log";
 
   txn_id_t max_commit_id;
+
+  CopySerializeOutput output_buffer;
+
+  std::set<cid_t> pending_commits;
 };
 
 }  // namespace logging

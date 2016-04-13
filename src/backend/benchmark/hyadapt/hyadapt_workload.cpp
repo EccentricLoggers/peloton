@@ -16,7 +16,6 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
-#include <chrono>
 #include <iostream>
 #include <ctime>
 #include <cassert>
@@ -35,6 +34,7 @@
 #include "backend/common/value.h"
 #include "backend/common/value_factory.h"
 #include "backend/common/logger.h"
+#include "backend/common/timer.h"
 #include "backend/concurrency/transaction.h"
 #include "backend/concurrency/transaction_manager_factory.h"
 
@@ -154,12 +154,12 @@ static int GetLowerBound() {
 
 static void ExecuteTest(std::vector<executor::AbstractExecutor *> &executors,
                         std::vector<double> columns_accessed, double cost) {
-  std::chrono::time_point<std::chrono::system_clock> start, end;
+  Timer<> timer;
 
   auto txn_count = state.transactions;
   bool status = false;
 
-  start = std::chrono::system_clock::now();
+  timer.Start();
 
   // Construct sample
   brain::Sample sample(columns_accessed, cost);
@@ -194,9 +194,8 @@ static void ExecuteTest(std::vector<executor::AbstractExecutor *> &executors,
 
     // Capture fine-grained stats in adapt experiment
     if (state.adapt == true) {
-      end = std::chrono::system_clock::now();
-      std::chrono::duration<double> elapsed_seconds = end - start;
-      double time_per_transaction = ((double)elapsed_seconds.count());
+      timer.Stop();
+      double time_per_transaction = timer.GetDuration();
 
       if (state.distribution == false) WriteOutput(time_per_transaction);
 
@@ -205,14 +204,13 @@ static void ExecuteTest(std::vector<executor::AbstractExecutor *> &executors,
         hyadapt_table->RecordSample(sample);
       }
 
-      start = std::chrono::system_clock::now();
+      timer.Start();
     }
   }
 
   if (state.adapt == false) {
-    end = std::chrono::system_clock::now();
-    std::chrono::duration<double> elapsed_seconds = end - start;
-    double time_per_transaction = ((double)elapsed_seconds.count()) / txn_count;
+    timer.Stop();
+    double time_per_transaction = timer.GetDuration() / txn_count;
 
     WriteOutput(time_per_transaction);
   }
@@ -285,11 +283,11 @@ void RunDirectTest() {
     col_itr++;
   }
 
-  std::unique_ptr<catalog::Schema> output_schema(
+  std::shared_ptr<const catalog::Schema> output_schema(
       new catalog::Schema(output_columns));
   bool physify_flag = true;  // is going to create a physical tile
   planner::MaterializationPlan mat_node(old_to_new_cols,
-                                        output_schema.release(), physify_flag);
+                                        output_schema, physify_flag);
 
   executor::MaterializationExecutor mat_executor(&mat_node, nullptr);
   mat_executor.AddChild(&seq_scan_executor);
@@ -310,13 +308,14 @@ void RunDirectTest() {
     target_list.emplace_back(col_id, expression);
   }
 
-  auto project_info = new planner::ProjectInfo(std::move(target_list),
-                                               std::move(direct_map_list));
+  std::unique_ptr<planner::ProjectInfo> project_info(
+      new planner::ProjectInfo(std::move(target_list),
+                               std::move(direct_map_list)));
 
   auto orig_tuple_count = state.scale_factor * state.tuples_per_tilegroup;
   auto bulk_insert_count = state.write_ratio * orig_tuple_count;
 
-  planner::InsertPlan insert_node(hyadapt_table.get(), project_info,
+  planner::InsertPlan insert_node(hyadapt_table.get(), std::move(project_info),
                                   bulk_insert_count);
   executor::InsertExecutor insert_executor(&insert_node, context.get());
 
@@ -392,8 +391,9 @@ void RunAggregateTest() {
     col_itr++;
   }
 
-  auto proj_info = new planner::ProjectInfo(planner::ProjectInfo::TargetList(),
-                                            std::move(direct_map_list));
+  std::unique_ptr<const planner::ProjectInfo> proj_info(
+      new planner::ProjectInfo(planner::ProjectInfo::TargetList(),
+                               std::move(direct_map_list)));
 
   // 3) Set up aggregates
   std::vector<planner::AggregatePlan::AggTerm> agg_terms;
@@ -405,7 +405,7 @@ void RunAggregateTest() {
   }
 
   // 4) Set up predicate (empty)
-  expression::AbstractExpression *aggregate_predicate = nullptr;
+  std::unique_ptr<const expression::AbstractExpression> aggregate_predicate(nullptr);
 
   // 5) Create output table schema
   auto data_table_schema = hyadapt_table->GetSchema();
@@ -413,11 +413,11 @@ void RunAggregateTest() {
   for (auto column_id : column_ids) {
     columns.push_back(data_table_schema->GetColumn(column_id));
   }
-  auto output_table_schema = new catalog::Schema(columns);
+  std::shared_ptr<const catalog::Schema> output_table_schema(new catalog::Schema(columns));
 
   // OK) Create the plan node
   planner::AggregatePlan aggregation_node(
-      proj_info, aggregate_predicate, std::move(agg_terms),
+      std::move(proj_info), std::move(aggregate_predicate), std::move(agg_terms),
       std::move(group_by_columns), output_table_schema, AGGREGATE_TYPE_PLAIN);
 
   executor::AggregateExecutor aggregation_executor(&aggregation_node,
@@ -442,11 +442,11 @@ void RunAggregateTest() {
     col_itr++;
   }
 
-  std::unique_ptr<catalog::Schema> output_schema(
+  std::shared_ptr<const catalog::Schema> output_schema(
       new catalog::Schema(output_columns));
   bool physify_flag = true;  // is going to create a physical tile
   planner::MaterializationPlan mat_node(old_to_new_cols,
-                                        output_schema.release(), physify_flag);
+                                        output_schema, physify_flag);
 
   executor::MaterializationExecutor mat_executor(&mat_node, nullptr);
   mat_executor.AddChild(&aggregation_executor);
@@ -467,12 +467,13 @@ void RunAggregateTest() {
     target_list.emplace_back(col_id, expression);
   }
 
-  auto project_info = new planner::ProjectInfo(std::move(target_list),
-                                               std::move(direct_map_list));
+  std::unique_ptr<planner::ProjectInfo> project_info(
+      new planner::ProjectInfo(std::move(target_list),
+                               std::move(direct_map_list)));
 
   auto orig_tuple_count = state.scale_factor * state.tuples_per_tilegroup;
   auto bulk_insert_count = state.write_ratio * orig_tuple_count;
-  planner::InsertPlan insert_node(hyadapt_table.get(), project_info,
+  planner::InsertPlan insert_node(hyadapt_table.get(), std::move(project_info),
                                   bulk_insert_count);
   executor::InsertExecutor insert_executor(&insert_node, context.get());
 
@@ -537,7 +538,8 @@ void RunArithmeticTest() {
   std::vector<catalog::Column> columns;
   auto orig_schema = hyadapt_table->GetSchema();
   columns.push_back(orig_schema->GetColumn(0));
-  auto projection_schema = new catalog::Schema(columns);
+  std::shared_ptr<const catalog::Schema> projection_schema(
+      new catalog::Schema(columns));
 
   // target list
   expression::AbstractExpression *sum_expr = nullptr;
@@ -562,10 +564,11 @@ void RunArithmeticTest() {
   planner::ProjectInfo::Target target = std::make_pair(0, sum_expr);
   target_list.push_back(target);
 
-  auto project_info = new planner::ProjectInfo(std::move(target_list),
-                                               std::move(direct_map_list));
+  std::unique_ptr<planner::ProjectInfo> project_info(
+      new planner::ProjectInfo(std::move(target_list),
+                               std::move(direct_map_list)));
 
-  planner::ProjectionPlan node(project_info, projection_schema);
+  planner::ProjectionPlan node(std::move(project_info), projection_schema);
 
   // Create and set up executor
   executor::ProjectionExecutor projection_executor(&node, nullptr);
@@ -585,11 +588,11 @@ void RunArithmeticTest() {
   output_columns.push_back(column);
   old_to_new_cols[col_itr] = col_itr;
 
-  std::unique_ptr<catalog::Schema> output_schema(
+  std::shared_ptr<const catalog::Schema> output_schema(
       new catalog::Schema(output_columns));
   bool physify_flag = true;  // is going to create a physical tile
   planner::MaterializationPlan mat_node(old_to_new_cols,
-                                        output_schema.release(), physify_flag);
+                                        output_schema, physify_flag);
 
   executor::MaterializationExecutor mat_executor(&mat_node, nullptr);
   mat_executor.AddChild(&projection_executor);
@@ -610,12 +613,12 @@ void RunArithmeticTest() {
     target_list.emplace_back(col_id, expression);
   }
 
-  project_info = new planner::ProjectInfo(std::move(target_list),
-                                          std::move(direct_map_list));
+  project_info.reset(new planner::ProjectInfo(std::move(target_list),
+                                              std::move(direct_map_list)));
 
   auto orig_tuple_count = state.scale_factor * state.tuples_per_tilegroup;
   auto bulk_insert_count = state.write_ratio * orig_tuple_count;
-  planner::InsertPlan insert_node(hyadapt_table.get(), project_info,
+  planner::InsertPlan insert_node(hyadapt_table.get(), std::move(project_info),
                                   bulk_insert_count);
   executor::InsertExecutor insert_executor(&insert_node, context.get());
 
@@ -681,10 +684,12 @@ void RunJoinTest() {
   auto join_type = JOIN_TYPE_INNER;
 
   // Create join predicate
-  expression::AbstractExpression *join_predicate = nullptr;
+  std::unique_ptr<const expression::AbstractExpression> join_predicate(nullptr);
+  std::unique_ptr<const planner::ProjectInfo> project_info(nullptr);
+  std::shared_ptr<const catalog::Schema> schema(nullptr);
 
-  planner::NestedLoopJoinPlan nested_loop_join_node(join_type, join_predicate,
-                                                    nullptr, nullptr);
+  planner::NestedLoopJoinPlan nested_loop_join_node(
+      join_type, std::move(join_predicate), std::move(project_info), schema);
 
   // Run the nested loop join executor
   executor::NestedLoopJoinExecutor nested_loop_join_executor(
@@ -711,11 +716,11 @@ void RunJoinTest() {
     old_to_new_cols[col_itr] = col_itr;
   }
 
-  std::unique_ptr<catalog::Schema> output_schema(
+  std::shared_ptr<const catalog::Schema> output_schema(
       new catalog::Schema(output_columns));
   bool physify_flag = true;  // is going to create a physical tile
   planner::MaterializationPlan mat_node(old_to_new_cols,
-                                        output_schema.release(), physify_flag);
+                                        output_schema, physify_flag);
 
   executor::MaterializationExecutor mat_executor(&mat_node, nullptr);
   mat_executor.AddChild(&nested_loop_join_executor);
@@ -813,11 +818,11 @@ void RunSubsetTest(SubsetType subset_test_type, double fraction,
     col_itr++;
   }
 
-  std::unique_ptr<catalog::Schema> output_schema(
+  std::shared_ptr<const catalog::Schema> output_schema(
       new catalog::Schema(output_columns));
   bool physify_flag = true;  // is going to create a physical tile
   planner::MaterializationPlan mat_node(old_to_new_cols,
-                                        output_schema.release(), physify_flag);
+                                        output_schema, physify_flag);
 
   executor::MaterializationExecutor mat_executor(&mat_node, nullptr);
   mat_executor.AddChild(&seq_scan_executor);
@@ -869,13 +874,14 @@ void RunInsertTest() {
     column_ids.push_back(col_id);
   }
 
-  auto project_info = new planner::ProjectInfo(std::move(target_list),
-                                               std::move(direct_map_list));
+  std::unique_ptr<const planner::ProjectInfo> project_info(
+      new planner::ProjectInfo(std::move(target_list),
+                               std::move(direct_map_list)));
 
   auto orig_tuple_count = state.scale_factor * state.tuples_per_tilegroup;
   auto bulk_insert_count = state.write_ratio * orig_tuple_count;
 
-  planner::InsertPlan insert_node(hyadapt_table.get(), project_info,
+  planner::InsertPlan insert_node(hyadapt_table.get(), std::move(project_info),
                                   bulk_insert_count);
   executor::InsertExecutor insert_executor(&insert_node, context.get());
 
@@ -940,9 +946,10 @@ void RunUpdateTest() {
     direct_map_list.emplace_back(col_itr, std::pair<oid_t, oid_t>(0, col_itr));
   }
 
-  auto project_info = new planner::ProjectInfo(std::move(target_list),
-                                               std::move(direct_map_list));
-  planner::UpdatePlan update_node(hyadapt_table.get(), project_info);
+  std::unique_ptr<const planner::ProjectInfo> project_info(
+      new planner::ProjectInfo(std::move(target_list),
+                               std::move(direct_map_list)));
+  planner::UpdatePlan update_node(hyadapt_table.get(), std::move(project_info));
 
   executor::UpdateExecutor update_executor(&update_node, context.get());
 
@@ -1803,8 +1810,7 @@ std::vector<oid_t> version_chain_lengths = {10, 100, 1000, 10000, 10000};
 
 void RunVersionExperiment() {
   oid_t tuple_count = version_chain_lengths.back();
-  std::chrono::time_point<std::chrono::system_clock> start, end;
-  std::chrono::duration<double> elapsed_seconds;
+  Timer<> timer;
   double version_chain_travesal_time = 0;
 
   std::unique_ptr<storage::TileGroupHeader> header(
@@ -1813,11 +1819,14 @@ void RunVersionExperiment() {
   // Create a version chain
   oid_t block_id = 0;
   header->SetNextItemPointer(0, INVALID_ITEMPOINTER);
+  header->SetPrevItemPointer(0, INVALID_ITEMPOINTER);
+
   for (oid_t tuple_itr = 1; tuple_itr < tuple_count; tuple_itr++) {
     header->SetNextItemPointer(tuple_itr, ItemPointer(block_id, tuple_itr - 1));
+    header->SetPrevItemPointer(tuple_itr - 1, ItemPointer(block_id, tuple_itr));
   }
 
-  start = std::chrono::system_clock::now();
+  timer.Start();
 
   // Traverse the version chain
   for (auto version_chain_length : version_chain_lengths) {
@@ -1831,9 +1840,8 @@ void RunVersionExperiment() {
       prev_item_pointer = header->GetNextItemPointer(prev_tuple_offset);
     }
 
-    end = std::chrono::system_clock::now();
-    elapsed_seconds = end - start;
-    version_chain_travesal_time = ((double)elapsed_seconds.count());
+    timer.Stop();
+    version_chain_travesal_time = timer.GetDuration();
 
     WriteOutput(version_chain_travesal_time);
   }
@@ -1931,18 +1939,18 @@ void RunHyriseExperiment() {
 oid_t scan_ctr = 0;
 oid_t insert_ctr = 0;
 
-static void ExecuteConcurrentTest(
-    std::vector<executor::AbstractExecutor *> &executors, oid_t thread_id,
-    oid_t num_threads, double scan_ratio) {
-  std::chrono::time_point<std::chrono::system_clock> start, end;
+static void ExecuteConcurrentTest(std::vector<executor::AbstractExecutor *> &executors,
+                                  oid_t thread_id, oid_t num_threads,
+                                  double scan_ratio) {
   std::random_device rd;
   std::mt19937 gen(rd());
   std::uniform_real_distribution<> dis(0, 1);
+  Timer<> timer;
 
   auto txn_count = state.transactions;
   bool status = false;
 
-  start = std::chrono::system_clock::now();
+  timer.Start();
 
   // Run these many transactions
   for (oid_t txn_itr = 0; txn_itr < txn_count; txn_itr++) {
@@ -1978,9 +1986,8 @@ static void ExecuteConcurrentTest(
     executor->Execute();
   }
 
-  end = std::chrono::system_clock::now();
-  std::chrono::duration<double> elapsed_seconds = end - start;
-  double time_per_transaction = ((double)elapsed_seconds.count()) / txn_count;
+  timer.Stop();
+  double time_per_transaction = timer.GetDuration() / txn_count;
 
   if (thread_id == 0) {
     double throughput = (double)num_threads / time_per_transaction;
@@ -2034,11 +2041,11 @@ void RunConcurrentTest(oid_t thread_id, oid_t num_threads, double scan_ratio) {
     col_itr++;
   }
 
-  std::unique_ptr<catalog::Schema> output_schema(
+  std::shared_ptr<const catalog::Schema> output_schema(
       new catalog::Schema(output_columns));
   bool physify_flag = true;  // is going to create a physical tile
   planner::MaterializationPlan mat_node(old_to_new_cols,
-                                        output_schema.release(), physify_flag);
+                                        output_schema, physify_flag);
 
   executor::MaterializationExecutor mat_executor(&mat_node, nullptr);
   mat_executor.AddChild(&seq_scan_executor);
@@ -2059,12 +2066,13 @@ void RunConcurrentTest(oid_t thread_id, oid_t num_threads, double scan_ratio) {
     target_list.emplace_back(col_id, expression);
   }
 
-  auto project_info = new planner::ProjectInfo(std::move(target_list),
-                                               std::move(direct_map_list));
+  std::unique_ptr<const planner::ProjectInfo> project_info(
+      new planner::ProjectInfo(std::move(target_list),
+                               std::move(direct_map_list)));
 
   auto bulk_insert_count = 1;
 
-  planner::InsertPlan insert_node(hyadapt_table.get(), project_info,
+  planner::InsertPlan insert_node(hyadapt_table.get(), std::move(project_info),
                                   bulk_insert_count);
   executor::InsertExecutor insert_executor(&insert_node, context.get());
 

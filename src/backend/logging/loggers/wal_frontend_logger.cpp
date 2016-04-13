@@ -15,6 +15,7 @@
 #include <sys/types.h>
 #include <sys/mman.h>
 #include <algorithm>
+#include <dirent.h>
 
 #include "backend/catalog/manager.h"
 #include "backend/catalog/schema.h"
@@ -22,6 +23,7 @@
 #include "backend/concurrency/transaction.h"
 #include "backend/concurrency/transaction_manager_factory.h"
 #include "backend/networking/logging_service.pb.h"
+#include "backend/concurrency/transaction_manager.h"
 #include "backend/logging/log_manager.h"
 #include "backend/logging/records/transaction_record.h"
 #include "backend/logging/records/tuple_record.h"
@@ -32,6 +34,10 @@
 #include "backend/storage/tile_group.h"
 #include "backend/storage/tuple.h"
 #include "backend/common/logger.h"
+#include "backend/index/index.h"
+#include "backend/executor/executor_context.h"
+#include "backend/planner/seq_scan_plan.h"
+#include "backend/bridge/dml/mapper/mapper.h"
 
 extern CheckpointType peloton_checkpoint_mode;
 
@@ -64,7 +70,7 @@ void SkipTupleRecordBody(FILE *log_file, size_t log_file_size);
 LogRecordType GetNextLogRecordType(FILE *log_file, size_t log_file_size);
 
 // Wrappers
-storage::DataTable *GetTable(TupleRecord tupleRecord);
+storage::DataTable *GetTable(TupleRecord &tupleRecord);
 
 int ExtractNumberFromFileName(const char *name);
 
@@ -103,7 +109,6 @@ WriteAheadFrontendLogger::WriteAheadFrontendLogger(bool for_testing) {
     this->log_file = nullptr;
 
   } else {
-    // TODO cleanup later
     this->checkpoint.Init();
 
     // abj1 adding code here!
@@ -119,10 +124,6 @@ WriteAheadFrontendLogger::WriteAheadFrontendLogger(bool for_testing) {
  * @brief close logfile
  */
 WriteAheadFrontendLogger::~WriteAheadFrontendLogger() {
-  for (auto log_record : global_queue) {
-    delete log_record;
-  }
-
   // close the log file
   if (log_file != nullptr) {
     int ret = fclose(log_file);
@@ -138,6 +139,7 @@ WriteAheadFrontendLogger::~WriteAheadFrontendLogger() {
 void fflush_and_sync(FILE *log_file, int log_file_fd, size_t &fsync_count) {
   // First, flush
   if (log_file_fd == -1) return;
+
   int ret = fflush(log_file);
   if (ret != 0) {
     LOG_ERROR("Error occured in fflush(%d)", ret);
@@ -150,58 +152,84 @@ void fflush_and_sync(FILE *log_file, int log_file_fd, size_t &fsync_count) {
     LOG_ERROR("Error occured in fsync(%d)", ret);
   }
 }
+
 /**
  * @brief flush all the log records to the file
  */
 void WriteAheadFrontendLogger::FlushLogRecords(void) {
+
+  size_t global_queue_size = global_queue.size();
+  // Nothing to flush
+  if (global_queue_size == 0) {
+	  return;
+  }
+
   // First, write all the record in the queue
-  if (global_queue.size() != 0 && this->log_file_fd == -1) {
+  if (this->log_file_fd == -1) {
     this->CreateNewLogFile(false);
   }
   auto stub_  = new networking::PelotonLoggingService_Stub(channel_);
-  for (auto record : global_queue) {
+
+  LOG_INFO("Flushing %lu log buffers..", global_queue_size);
+  for (oid_t global_queue_itr = 0; global_queue_itr < global_queue_size;
+       global_queue_itr++) {
     if (this->FileSwitchCondIsTrue()) {
       fflush_and_sync(log_file, log_file_fd, fsync_count);
       this->CreateNewLogFile(true);
     }
+    auto &log_buffer = global_queue[global_queue_itr];
     networking::LogRecordReplayRequest request;
-    char * message = new char[record->GetMessageLength()];
-    memcpy(message, record->GetMessage(), record->GetMessageLength());
-    request.set_log(message, record->GetMessageLength());
+    char * message = new char[log_buffer->GetSize()];
+    memcpy(message, log_buffer->GetData(), log_buffer->GetSize());
+    request.set_log(message, log_buffer->GetSize());
     request.set_sync_type(networking::ResponseType::SYNC);
     networking::LogRecordReplayResponse response;
-    LOG_INFO("Size before and after : %lu, %lu", record->GetMessageLength(), request.log().size());
-    char blah[request.ByteSize()];
-    request.SerializeToArray(blah, request.ByteSize());
-    networking::LogRecordReplayRequest request2;
-    request2.ParseFromArray(blah, request.ByteSize());
-    LOG_INFO("Size before and after : %lu, %lu", record->GetMessageLength(), request2.log().size());
     stub_->LogRecordReplay(controller_, &request, nullptr, nullptr);
-    fwrite(record->GetMessage(), sizeof(char), record->GetMessageLength(),
+
+
+    fwrite(log_buffer->GetData(), sizeof(char), log_buffer->GetSize(),
            log_file);
-    LOG_INFO("TransactionID of this Log is %d",
-             (int)record->GetTransactionId());
-    if (record->GetTransactionId() > this->max_commit_id) {
+    if (log_buffer->GetHighestCommitId() > this->max_commit_id) {
+      this->max_commit_id = log_buffer->GetHighestCommitId();
       LOG_INFO("MaxSoFar is %d", (int)this->max_commit_id);
-      this->max_commit_id = record->GetTransactionId();
     }
+
+    // return empty buffer
+    auto backend_logger = log_buffer->GetBackendLogger();
+    log_buffer->ResetData();
+    backend_logger->GrantEmptyBuffer(std::move(log_buffer));
   }
+
+
   delete stub_;
+
+  assert(global_queue_size > 0);
+    TransactionRecord delimiter_rec(LOGRECORD_TYPE_ITERATION_DELIMITER,
+                                    this->max_collected_commit_id);
+    delimiter_rec.Serialize(output_buffer);
+    if (this->FileSwitchCondIsTrue()) {
+      fflush_and_sync(log_file, log_file_fd, fsync_count);
+      this->CreateNewLogFile(true);
+    }
+    if (log_file_fd != -1) {
+      fwrite(delimiter_rec.GetMessage(), sizeof(char),
+             delimiter_rec.GetMessageLength(), log_file);
+      LOG_INFO("Wrote delimiter log file with commit_id %ld",
+               this->max_collected_commit_id);
+    }
+
   fflush_and_sync(log_file, log_file_fd, fsync_count);
 
   // Clean up the frontend logger's queue
-  for (auto record : global_queue) {
-    delete record;
-  }
   global_queue.clear();
 
   // Commit each backend logger
-  {
-    std::lock_guard<std::mutex> lock(backend_logger_mutex);
-    for (auto backend_logger : backend_loggers) {
-      backend_logger->Commit();
-    }
+  if (max_collected_commit_id > max_flushed_commit_id) {
+    max_flushed_commit_id = max_collected_commit_id;
   }
+  // signal that we have flushed
+  LogManager::GetInstance().FrontendLoggerFlushed();
+
 }
 
 //===--------------------------------------------------------------------===//
@@ -212,8 +240,9 @@ void WriteAheadFrontendLogger::FlushLogRecords(void) {
  * @brief Recovery system based on log file
  */
 void WriteAheadFrontendLogger::DoRecovery() {
+  cid_t start_commit_id = 0;
   if (peloton_checkpoint_mode == CHECKPOINT_TYPE_NORMAL) {
-    this->checkpoint.DoRecovery();
+    start_commit_id = this->checkpoint.DoRecovery();
   }
 
   log_file_cursor_ = 0;
@@ -225,18 +254,19 @@ void WriteAheadFrontendLogger::DoRecovery() {
   // Go over the log size if needed
   if (log_file_size > 0) {
     bool reached_end_of_file = false;
+    __attribute__((unused)) oid_t recovery_log_record_count = 0;
 
     // Go over each log record in the log file
     while (reached_end_of_file == false) {
       // Read the first byte to identify log record type
       // If that is not possible, then wrap up recovery
-      auto record_type =
-          this->GetNextLogRecordTypeForRecovery(log_file, log_file_size);
+      auto record_type = this->GetNextLogRecordTypeForRecovery();
       cid_t commit_id = INVALID_CID;
       TupleRecord *tuple_record;
       switch (record_type) {
         case LOGRECORD_TYPE_TRANSACTION_BEGIN:
-        case LOGRECORD_TYPE_TRANSACTION_COMMIT: {
+        case LOGRECORD_TYPE_TRANSACTION_COMMIT:
+        case LOGRECORD_TYPE_ITERATION_DELIMITER: {
           // Check for torn log write
           TransactionRecord txn_rec(record_type);
           if (ReadTransactionRecordHeader(txn_rec, log_file, log_file_size) ==
@@ -245,6 +275,9 @@ void WriteAheadFrontendLogger::DoRecovery() {
             return;
           }
           commit_id = txn_rec.GetTransactionId();
+          if (commit_id <= start_commit_id) {
+            continue;
+          }
           break;
         }
         case LOGRECORD_TYPE_WAL_TUPLE_INSERT:
@@ -259,19 +292,18 @@ void WriteAheadFrontendLogger::DoRecovery() {
           }
 
           auto cid = tuple_record->GetTransactionId();
-          if (recovery_txn_table.find(cid) == recovery_txn_table.end()) {
-            LOG_ERROR("Insert txd id %d not found in recovery txn table",
-                      (int)cid);
-
-            this->log_file_fd = -1;
-            return;
-          }
-
           auto table = GetTable(*tuple_record);
-          if (!table) {
+          if (!table || cid <= start_commit_id) {
             SkipTupleRecordBody(log_file, log_file_size);
             delete tuple_record;
             continue;
+          }
+
+          if (recovery_txn_table.find(cid) == recovery_txn_table.end()) {
+            LOG_ERROR("Insert txd id %d not found in recovery txn table",
+                      (int)cid);
+            this->log_file_fd = -1;
+            return;
           }
 
           // Read off the tuple record body from the log
@@ -289,6 +321,10 @@ void WriteAheadFrontendLogger::DoRecovery() {
           }
 
           auto cid = tuple_record->GetTransactionId();
+          if (cid <= start_commit_id) {
+            delete tuple_record;
+            continue;
+          }
           if (recovery_txn_table.find(cid) == recovery_txn_table.end()) {
             LOG_TRACE("Delete txd id %d not found in recovery txn table",
                       (int)cid);
@@ -310,7 +346,7 @@ void WriteAheadFrontendLogger::DoRecovery() {
 
           case LOGRECORD_TYPE_TRANSACTION_COMMIT:
             assert(commit_id != INVALID_CID);
-            CommitTransactionRecovery(commit_id);
+            pending_commits.insert(commit_id);
             break;
 
           case LOGRECORD_TYPE_WAL_TUPLE_INSERT:
@@ -319,6 +355,20 @@ void WriteAheadFrontendLogger::DoRecovery() {
             recovery_txn_table[tuple_record->GetTransactionId()].push_back(
                 tuple_record);
             break;
+          case LOGRECORD_TYPE_ITERATION_DELIMITER: {
+            auto it = pending_commits.begin();
+            for (; it != pending_commits.end(); it++) {
+              cid_t curr = *it;
+              if (curr > commit_id) {
+                break;
+              }
+              CommitTransactionRecovery(curr);
+            }
+            if (it != pending_commits.begin()) {
+              pending_commits.erase(pending_commits.begin(), it);
+            }
+            break;
+          }
 
           default:
             LOG_INFO("Got Type as TXN_INVALID");
@@ -330,6 +380,7 @@ void WriteAheadFrontendLogger::DoRecovery() {
 
     // Finally, abort ACTIVE transactions in recovery_txn_table
     AbortActiveTransactions();
+    pending_commits.clear();
 
     // After finishing recovery, set the next oid with maximum oid
     // observed during the recovery
@@ -338,9 +389,145 @@ void WriteAheadFrontendLogger::DoRecovery() {
       manager.SetNextOid(max_oid);
     }
 
-    concurrency::TransactionManagerFactory::GetInstance().SetNextCid(max_cid);
+    auto &txn_manager = concurrency::TransactionManagerFactory::GetInstance();
+    if (txn_manager.GetNextCommitId() < max_cid) {
+      txn_manager.SetNextCid(max_cid + 1);
+    }
+
+    RecoverIndex();
   }
   this->log_file_fd = -1;
+}
+
+void WriteAheadFrontendLogger::RecoverIndex() {
+  auto &txn_manager = concurrency::TransactionManagerFactory::GetInstance();
+  LOG_INFO("Recovering the indexes");
+
+  // get txn
+  std::unique_ptr<concurrency::Transaction> txn(txn_manager.BeginTransaction());
+  assert(txn);
+  LOG_TRACE("Txn ID = %lu, Start commit id = %lu ", txn->GetTransactionId(),
+            start_commit_id);
+
+  // build executor context
+  std::unique_ptr<executor::ExecutorContext> executor_context(
+      new executor::ExecutorContext(
+          txn.get(), bridge::PlanTransformer::BuildParams(nullptr)));
+
+  auto &catalog_manager = catalog::Manager::GetInstance();
+  auto database_count = catalog_manager.GetDatabaseCount();
+  bool failure = false;
+  // loop all databases
+  for (oid_t database_idx = 0; database_idx < database_count && !failure;
+       database_idx++) {
+    auto database = catalog_manager.GetDatabase(database_idx);
+    auto table_count = database->GetTableCount();
+
+    // loop all tables
+    for (oid_t table_idx = 0; table_idx < table_count && !failure;
+         table_idx++) {
+      // Get the target table
+      storage::DataTable *target_table = database->GetTable(table_idx);
+      assert(target_table);
+      LOG_INFO("SeqScan: database oid %lu table oid %lu: %s", database_idx,
+               table_idx, target_table->GetName().c_str());
+
+      auto schema = target_table->GetSchema();
+      assert(schema);
+      std::vector<oid_t> column_ids;
+      column_ids.resize(schema->GetColumnCount());
+      std::iota(column_ids.begin(), column_ids.end(), 0);
+
+      // Construct the plan node
+      LOG_TRACE("Initializing the executor tree");
+      std::unique_ptr<planner::SeqScanPlan> scan_plan_node(
+          new planner::SeqScanPlan(target_table, nullptr, column_ids));
+      std::unique_ptr<executor::SeqScanExecutor> scan_executor(
+          new executor::SeqScanExecutor(scan_plan_node.get(),
+                                        executor_context.get()));
+      scan_executor->SetCheckpointMode(true);
+      if (!RecoverIndexHelper(scan_executor.get(), target_table)) {
+        break;
+      }
+    }
+  }
+}
+
+bool WriteAheadFrontendLogger::RecoverIndexHelper(
+    executor::AbstractExecutor *scan_executor,
+    storage::DataTable *target_table) {
+  // Prepare columns
+  auto schema = target_table->GetSchema();
+  std::vector<oid_t> column_ids;
+  column_ids.resize(schema->GetColumnCount());
+  std::iota(column_ids.begin(), column_ids.end(), 0);
+
+  // Initialize the seq scan executor
+  auto status = scan_executor->Init();
+  // Abort and cleanup
+  if (status == false) {
+    LOG_ERROR("Failed to init scan executor during recovery");
+    return false;
+  }
+
+  // Execute seq scan until we get result tiles
+  for (;;) {
+    status = scan_executor->Execute();
+    // Stop
+    if (status == false) {
+      break;
+    }
+
+    // Retrieve a logical tile
+    std::unique_ptr<executor::LogicalTile> logical_tile(
+        scan_executor->GetOutput());
+    auto tile_group_id = logical_tile->GetColumnInfo(0)
+                             .base_tile->GetTileGroup()
+                             ->GetTileGroupId();
+    LOG_TRACE("Retrieved tile group %lu", tile_group_id);
+
+    // Go over the logical tile
+    for (oid_t tuple_id : *logical_tile) {
+      expression::ContainerTuple<executor::LogicalTile> cur_tuple(
+          logical_tile.get(), tuple_id);
+
+      // Index update
+      {
+        // construct a physical tuple from the logical tuple
+        std::unique_ptr<storage::Tuple> tuple(new storage::Tuple(schema, true));
+        for (auto column_id : column_ids) {
+          tuple->SetValue(column_id, cur_tuple.GetValue(column_id),
+                          recovery_pool);
+        }
+
+        ItemPointer location(tile_group_id, tuple_id);
+        InsertIndexEntry(tuple.get(), target_table, location);
+      }
+    }
+  }
+  return true;
+}
+
+void WriteAheadFrontendLogger::InsertIndexEntry(storage::Tuple *tuple,
+                                                storage::DataTable *table,
+                                                ItemPointer target_location) {
+  assert(tuple);
+  assert(table);
+  auto index_count = table->GetIndexCount();
+  LOG_TRACE("Insert tuple (%lu, %lu) into %lu indexes", target_location.block,
+            target_location.offset, index_count);
+
+  for (int index_itr = index_count - 1; index_itr >= 0; --index_itr) {
+    auto index = table->GetIndex(index_itr);
+    auto index_schema = index->GetKeySchema();
+    auto indexed_columns = index_schema->GetIndexedColumns();
+    std::unique_ptr<storage::Tuple> key(new storage::Tuple(index_schema, true));
+    key->SetFromTuple(tuple, indexed_columns, index->GetPool());
+
+    index->InsertEntry(key.get(), target_location);
+    // Increase the indexes' number of tuples by 1 as well
+    index->IncreaseNumberOfTuplesBy(1);
+  }
 }
 
 /**
@@ -355,150 +542,6 @@ void WriteAheadFrontendLogger::AbortActiveTransactions() {
   }
   recovery_txn_table.clear();
 }
-
-///**
-// * @brief Add new txn to recovery table
-// */
-//void WriteAheadFrontendLogger::StartTransactionRecovery(cid_t commit_id) {
-//  std::vector<TupleRecord *> tuple_recs;
-//  recovery_txn_table[commit_id] = tuple_recs;
-//}
-//
-///**
-// * @brief move tuples from current txn to recovery txn so that we can commit
-// * them later
-// * @param recovery txn
-// */
-//void WriteAheadFrontendLogger::CommitTransactionRecovery(cid_t commit_id) {
-//  std::vector<TupleRecord *> &tuple_records = recovery_txn_table[commit_id];
-//  for (auto it = tuple_records.begin(); it != tuple_records.end(); it++) {
-//    TupleRecord *curr = *it;
-//    switch (curr->GetType()) {
-//      case LOGRECORD_TYPE_WAL_TUPLE_INSERT:
-//        InsertTuple(curr);
-//        break;
-//      case LOGRECORD_TYPE_WAL_TUPLE_UPDATE:
-//        UpdateTuple(curr);
-//        break;
-//      case LOGRECORD_TYPE_WAL_TUPLE_DELETE:
-//        DeleteTuple(curr);
-//        break;
-//      default:
-//        continue;
-//    }
-//    delete curr;
-//  }
-//  max_cid = commit_id + 1;
-//  recovery_txn_table.erase(commit_id);
-//}
-
-//void InsertTupleHelper(oid_t &max_tg, cid_t commit_id, oid_t db_id,
-//                       oid_t table_id, const ItemPointer &insert_loc,
-//                       storage::Tuple *tuple) {
-//  auto &manager = catalog::Manager::GetInstance();
-//  auto tile_group = manager.GetTileGroup(insert_loc.block);
-//  storage::Database *db = manager.GetDatabaseWithOid(db_id);
-//  assert(db);
-//
-//  auto table = db->GetTableWithOid(table_id);
-//  if (!table) {
-//    delete tuple;
-//    return;
-//  }
-//  assert(table);
-//  if (tile_group == nullptr) {
-//    table->AddTileGroupWithOid(insert_loc.block);
-//    tile_group = manager.GetTileGroup(insert_loc.block);
-//    if (max_tg < insert_loc.block) {
-//      max_tg = insert_loc.block;
-//    }
-//  }
-//
-//  tile_group->InsertTupleFromRecovery(commit_id, insert_loc.offset, tuple);
-//  table->IncreaseNumberOfTuplesBy(1);
-//  delete tuple;
-//}
-//
-//void DeleteTupleHelper(oid_t &max_tg, cid_t commit_id, oid_t db_id,
-//                       oid_t table_id, const ItemPointer &delete_loc) {
-//  auto &manager = catalog::Manager::GetInstance();
-//  auto tile_group = manager.GetTileGroup(delete_loc.block);
-//  storage::Database *db = manager.GetDatabaseWithOid(db_id);
-//  assert(db);
-//
-//  auto table = db->GetTableWithOid(table_id);
-//  if (!table) {
-//    return;
-//  }
-//  assert(table);
-//  if (tile_group == nullptr) {
-//    table->AddTileGroupWithOid(delete_loc.block);
-//    tile_group = manager.GetTileGroup(delete_loc.block);
-//    if (max_tg < delete_loc.block) {
-//      max_tg = delete_loc.block;
-//    }
-//  }
-//  table->DecreaseNumberOfTuplesBy(1);
-//  tile_group->DeleteTupleFromRecovery(commit_id, delete_loc.offset);
-//}
-//
-//void UpdateTupleHelper(oid_t &max_tg, cid_t commit_id, oid_t db_id,
-//                       oid_t table_id, const ItemPointer &remove_loc,
-//                       const ItemPointer &insert_loc, storage::Tuple *tuple) {
-//  auto &manager = catalog::Manager::GetInstance();
-//  auto tile_group = manager.GetTileGroup(remove_loc.block);
-//  storage::Database *db = manager.GetDatabaseWithOid(db_id);
-//  assert(db);
-//
-//  auto table = db->GetTableWithOid(table_id);
-//  if (!table) {
-//    delete tuple;
-//    return;
-//  }
-//  assert(table);
-//  if (tile_group == nullptr) {
-//    table->AddTileGroupWithOid(remove_loc.block);
-//    tile_group = manager.GetTileGroup(remove_loc.block);
-//    if (max_tg < remove_loc.block) {
-//      max_tg = remove_loc.block;
-//    }
-//  }
-//  InsertTupleHelper(max_tg, commit_id, db_id, table_id, insert_loc, tuple);
-//
-//  tile_group->UpdateTupleFromRecovery(commit_id, remove_loc.offset, insert_loc);
-//}
-//
-///**
-// * @brief read tuple record from log file and add them tuples to recovery txn
-// * @param recovery txn
-// */
-//void WriteAheadFrontendLogger::InsertTuple(TupleRecord *record) {
-//  InsertTupleHelper(max_oid, record->GetTransactionId(),
-//                    record->GetDatabaseOid(), record->GetTableId(),
-//                    record->GetInsertLocation(), record->GetTuple());
-//}
-//
-///**
-// * @brief read tuple record from log file and add them tuples to recovery txn
-// * @param recovery txn
-// */
-//void WriteAheadFrontendLogger::DeleteTuple(TupleRecord *record) {
-//  DeleteTupleHelper(max_oid, record->GetTransactionId(),
-//                    record->GetDatabaseOid(), record->GetTableId(),
-//                    record->GetDeleteLocation());
-//}
-//
-///**
-// * @brief read tuple record from log file and add them tuples to recovery txn
-// * @param recovery txn
-// */
-//
-//void WriteAheadFrontendLogger::UpdateTuple(TupleRecord *record) {
-//  UpdateTupleHelper(max_oid, record->GetTransactionId(),
-//                    record->GetDatabaseOid(), record->GetTableId(),
-//                    record->GetDeleteLocation(), record->GetInsertLocation(),
-//                    record->GetTuple());
-//}
 
 //===--------------------------------------------------------------------===//
 // Utility functions
@@ -554,7 +597,6 @@ size_t GetNextFrameSize(FILE *log_file, size_t log_file_size) {
   // Read next 4 bytes as an integer
   CopySerializeInputBE frameCheck(buffer, sizeof(buffer));
   frame_size = (frameCheck.ReadInt()) + sizeof(buffer);
-  ;
 
   // Move back by 4 bytes
   // So that tuple deserializer works later as expected
@@ -599,25 +641,24 @@ LogRecordType GetNextLogRecordType(FILE *log_file, size_t log_file_size) {
   return log_record_type;
 }
 
-LogRecordType WriteAheadFrontendLogger::GetNextLogRecordTypeForRecovery(
-    FILE *log_file, size_t log_file_size) {
+LogRecordType WriteAheadFrontendLogger::GetNextLogRecordTypeForRecovery() {
   char buffer;
   bool is_truncated = false;
   int ret;
 
   LOG_INFO("Inside GetNextLogRecordForRecovery");
 
-  LOG_INFO("File is at position %d", (int)ftell(log_file));
+  LOG_INFO("File is at position %d", (int)ftell(this->log_file));
   // Check if the log record type is broken
-  if (IsFileTruncated(log_file, 1, log_file_size)) {
-    LOG_ERROR("Log file is truncated");
+  if (IsFileTruncated(this->log_file, 1, this->log_file_size)) {
+    LOG_INFO("Log file is truncated, should open next log file");
     // return LOGRECORD_TYPE_INVALID;
     is_truncated = true;
   }
 
   // Otherwise, read the log record type
   if (!is_truncated) {
-    ret = fread((void *)&buffer, 1, sizeof(char), log_file);
+    ret = fread((void *)&buffer, 1, sizeof(char), this->log_file);
     if (ret <= 0) LOG_INFO("Failed an fread");
   }
   if (is_truncated || ret <= 0) {
@@ -625,14 +666,14 @@ LogRecordType WriteAheadFrontendLogger::GetNextLogRecordTypeForRecovery(
     this->OpenNextLogFile();
     if (this->log_file_fd == -1) return LOGRECORD_TYPE_INVALID;
 
-    LOG_INFO("Open succeeded. log_file_fd is %d", (int)log_file_fd);
+    LOG_INFO("Open succeeded. log_file_fd is %d", (int)this->log_file_fd);
 
-    if (IsFileTruncated(log_file, 1, log_file_size)) {
+    if (IsFileTruncated(this->log_file, 1, this->log_file_size)) {
       LOG_ERROR("Log file is truncated");
       return LOGRECORD_TYPE_INVALID;
     }
     LOG_INFO("File is not truncated.");
-    ret = fread((void *)&buffer, 1, sizeof(char), log_file);
+    ret = fread((void *)&buffer, 1, sizeof(char), this->log_file);
     if (ret <= 0) {
       LOG_ERROR("Could not read from log file");
       return LOGRECORD_TYPE_INVALID;
@@ -758,7 +799,7 @@ void SkipTupleRecordBody(FILE *log_file, size_t log_file_size) {
  * @param tuple record
  * @return data table
  */
-storage::DataTable *GetTable(TupleRecord tuple_record) {
+storage::DataTable *GetTable(TupleRecord &tuple_record) {
   // Get db, table, schema to insert tuple
   auto &manager = catalog::Manager::GetInstance();
   storage::Database *db =
@@ -827,13 +868,20 @@ void WriteAheadFrontendLogger::InitLogFilesList() {
       fp = fopen(this->GetFileNameFromVersion(version_number).c_str(), "rb");
       max_commit_id = UINT64_MAX;
 
-      fread((void *)&max_commit_id, sizeof(max_commit_id), 1, fp);
+      size_t read_size =
+          fread((void *)&max_commit_id, sizeof(max_commit_id), 1, fp);
+      if (read_size != 1) {
+        LOG_ERROR("Read from file %s failed",
+                  this->GetFileNameFromVersion(version_number).c_str());
+        fclose(fp);
+        continue;
+      }
       LOG_INFO("Got max_commit_id as %d", (int)max_commit_id);
 
       // TODO set max commit ID here!
       if (max_commit_id == 0 || max_commit_id == UINT64_MAX) {
         // TODO uncomment
-        // max_commit_id = this->ExtractMaxCommitIdFromLogFileRecords(fp);
+        max_commit_id = this->ExtractMaxCommitIdFromLogFileRecords(fp);
         LOG_INFO("ExtractMaxCommitId returned %d", (int)max_commit_id);
       }
 
@@ -948,6 +996,7 @@ bool WriteAheadFrontendLogger::FileSwitchCondIsTrue() {
   if (this->log_file_fd == -1) return false;
 
   fstat(this->log_file_fd, &stat_buf);
+  this->log_file_size = stat_buf.st_size;
   return stat_buf.st_size > LOG_FILE_SWITCH_LIMIT;
 }
 
@@ -997,7 +1046,16 @@ void WriteAheadFrontendLogger::OpenNextLogFile() {
   LOG_INFO("FD of opened file is %d", (int)this->log_file_fd);
 
   // Skip first 8 bytes of max commit id
-  fread((void *)&max_commit_id, 1, sizeof(max_commit_id), this->log_file);
+  size_t read_size =
+      fread((void *)&max_commit_id, sizeof(max_commit_id), 1, this->log_file);
+  if (read_size != 1) {
+    LOG_ERROR(
+        "Read failed after opening file %s",
+        this->GetFileNameFromVersion(
+                  this->log_files_[this->log_file_cursor_]->GetLogNumber())
+            .c_str());
+  }
+
   LOG_INFO("On startup: MaxCommitId of this file is %d", (int)max_commit_id);
 
   struct stat stat_buf;
@@ -1017,8 +1075,9 @@ void WriteAheadFrontendLogger::TruncateLog(txn_id_t max_commit_id) {
     if (max_commit_id >= this->log_files_[i]->GetMaxCommitId()) {
       return_val = remove(this->log_files_[i]->GetLogFileName().c_str());
       if (return_val != 0) {
-        LOG_ERROR("Couldn't delete log file: %s",
-                  this->log_files_[i]->GetLogFileName().c_str());
+        LOG_ERROR("Couldn't delete log file: %s error: %s",
+                  this->log_files_[i]->GetLogFileName().c_str(),
+                  strerror(errno));
       }
       // remove entry from list anyway
       delete this->log_files_[i];
@@ -1058,7 +1117,7 @@ txn_id_t WriteAheadFrontendLogger::ExtractMaxCommitIdFromLogFileRecords(
   bool reached_end_of_file = false;
   int fd;
   struct stat log_stats;
-  txn_id_t max_commit_id;
+  txn_id_t max_commit_id = 0;
   int log_file_size;
 
   fd = fileno(log_file);
@@ -1070,7 +1129,6 @@ txn_id_t WriteAheadFrontendLogger::ExtractMaxCommitIdFromLogFileRecords(
     // Read the first byte to identify log record type
     // If that is not possible, then wrap up recovery
     auto record_type = GetNextLogRecordType(log_file, log_file_size);
-    LOG_INFO("Record type is %d", record_type);
 
     cid_t commit_id = INVALID_CID;
 
@@ -1098,6 +1156,7 @@ txn_id_t WriteAheadFrontendLogger::ExtractMaxCommitIdFromLogFileRecords(
         if (ReadTupleRecordHeader(*tuple_record, log_file, log_file_size) ==
             false) {
           LOG_ERROR("Could not read tuple record header.");
+          delete tuple_record;
           return UINT64_MAX;
         }
 
@@ -1112,6 +1171,18 @@ txn_id_t WriteAheadFrontendLogger::ExtractMaxCommitIdFromLogFileRecords(
 
         if (cid > max_commit_id) max_commit_id = cid;
 
+        auto table = GetTable(*tuple_record);
+        if (!table) {
+          SkipTupleRecordBody(log_file, log_file_size);
+          delete tuple_record;
+          continue;
+        }
+
+        // Read off the tuple record body from the log
+        ReadTupleRecordBody(table->GetSchema(), recovery_pool, log_file,
+                            log_file_size);
+        delete tuple_record;
+
         break;
       }
       case LOGRECORD_TYPE_WAL_TUPLE_DELETE: {
@@ -1120,6 +1191,7 @@ txn_id_t WriteAheadFrontendLogger::ExtractMaxCommitIdFromLogFileRecords(
         // TODO if this fails, is there a memory leak? @mperron
         if (ReadTupleRecordHeader(*tuple_record, log_file, log_file_size) ==
             false) {
+          delete tuple_record;
           return UINT64_MAX;  // TODO same as below
         }
 
@@ -1132,6 +1204,7 @@ txn_id_t WriteAheadFrontendLogger::ExtractMaxCommitIdFromLogFileRecords(
         } */
 
         if (cid > max_commit_id) max_commit_id = cid;
+        delete tuple_record;
         break;
       }
       default:

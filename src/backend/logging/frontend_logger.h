@@ -13,13 +13,17 @@
 #pragma once
 
 #include <iostream>
-#include <mutex>
+#include <atomic>
 #include <condition_variable>
 #include <vector>
 #include <unistd.h>
+#include <map>
+#include <thread>
 
 #include "backend/common/types.h"
 #include "backend/logging/logger.h"
+#include "backend/logging/log_buffer.h"
+#include "backend/logging/buffer_pool.h"
 #include "backend/logging/backend_logger.h"
 #include "backend/logging/checkpoint.h"
 #include "backend/logging/records/tuple_record.h"
@@ -47,8 +51,6 @@ class FrontendLogger : public Logger {
 
   void AddBackendLogger(BackendLogger *backend_logger);
 
-  bool RemoveBackendLogger(BackendLogger *backend_logger);
-
   //===--------------------------------------------------------------------===//
   // Virtual Functions
   //===--------------------------------------------------------------------===//
@@ -63,37 +65,38 @@ class FrontendLogger : public Logger {
 
   void ReplayLog(const char *, size_t len);
 
-  void StartTransactionRecovery(cid_t commit_id);
 
-  void CommitTransactionRecovery(cid_t commit_id);
+  virtual void StartTransactionRecovery(cid_t commit_id);
 
-  void InsertTuple(TupleRecord *recovery_txn);
+  virtual void CommitTransactionRecovery(cid_t commit_id);
 
-  void DeleteTuple(TupleRecord *recovery_txn);
+  virtual void InsertTuple(TupleRecord *recovery_txn);
 
-  void UpdateTuple(TupleRecord *recovery_txn);
+  virtual void DeleteTuple(TupleRecord *recovery_txn);
 
-  void AddTupleRecord(cid_t commit_id, TupleRecord* tuple_record);
+  virtual void UpdateTuple(TupleRecord *recovery_txn);
+
+  virtual void AddTupleRecord(cid_t commit_id, TupleRecord* tuple_record);
 
   VarlenPool *GetRecoveryPool(void);
+
+  cid_t GetMaxFlushedCommitId();
+
+  void SetBackendLoggerLoggedCid(BackendLogger &bel);
 
  protected:
   // Associated backend loggers
   std::vector<BackendLogger *> backend_loggers;
 
-  // Since backend loggers can add themselves into the list above
-  // via log manager, we need to protect the backend_loggers list
-  std::mutex backend_logger_mutex;
-
   // Global queue
-  std::vector<LogRecord *> global_queue;
+  std::vector<std::unique_ptr<LogBuffer>> global_queue;
+
+  // To synch the status
+  std::atomic_flag backend_loggers_lock;
 
   // period with which it collects log records from backend loggers
   // (in microseconds)
   int64_t wait_timeout;
-
-  // used to indicate if backend has new logs
-  bool need_to_collect_new_log_records = false;
 
   // stats
   size_t fsync_count = 0;
@@ -111,6 +114,10 @@ class FrontendLogger : public Logger {
 
   // pool for allocating non-inlined values
   VarlenPool *recovery_pool = new VarlenPool(BACKEND_TYPE_MM);
+
+  cid_t max_flushed_commit_id = 0;
+
+  cid_t max_collected_commit_id = 0;
 };
 
 }  // namespace logging

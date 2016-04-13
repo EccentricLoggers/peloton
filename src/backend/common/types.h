@@ -30,27 +30,20 @@ enum LoggingType {
   LOGGING_TYPE_INVALID = 0,
 
   // Based on write ahead logging
-  LOGGING_TYPE_DRAM_NVM = 1,
-  LOGGING_TYPE_DRAM_SSD = 11,
-  LOGGING_TYPE_DRAM_HDD = 12,
+  LOGGING_TYPE_DRAM_NVM = 10,
+  LOGGING_TYPE_DRAM_HDD = 11,
 
   // Based on write behind logging
   LOGGING_TYPE_NVM_NVM = 20,
-  LOGGING_TYPE_NVM_SSD = 21,
-  LOGGING_TYPE_NVM_HDD = 22,
+  LOGGING_TYPE_NVM_HDD = 21,
 
-  LOGGING_TYPE_SSD_NVM = 30,
-  LOGGING_TYPE_SSD_SSD = 31,
-  LOGGING_TYPE_SSD_HDD = 32,
-
-  LOGGING_TYPE_HDD_NVM = 40,
-  LOGGING_TYPE_HDD_SSD = 41,
-  LOGGING_TYPE_HDD_HDD = 42,
+  LOGGING_TYPE_HDD_NVM = 30,
+  LOGGING_TYPE_HDD_HDD = 31,
 };
 
 enum CheckpointType {
   CHECKPOINT_TYPE_INVALID = 0,
-  CHECKPOINT_TYPE_NORMAL  = 1,
+  CHECKPOINT_TYPE_NORMAL = 1,
 };
 //===--------------------------------------------------------------------===//
 // Filesystem directories
@@ -58,7 +51,6 @@ enum CheckpointType {
 
 #define NVM_DIR "/mnt/pmfs/"
 #define HDD_DIR "/data/"
-#define SSD_DIR "/data1/"
 
 #define TMP_DIR "/tmp/"
 
@@ -294,8 +286,6 @@ enum ExpressionType {
   // -----------------------------
   // Internals added for Case When
   // -----------------------------
-  EXPRESSION_TYPE_OPERATOR_CASE_WHEN = 300,
-  EXPRESSION_TYPE_OPERATOR_ALTERNATIVE = 301,
   EXPRESSION_TYPE_OPERATOR_CASE_EXPR = 302,
 
   // -----------------------------
@@ -360,11 +350,12 @@ enum ExpressionType {
 //===--------------------------------------------------------------------===//
 
 enum ConcurrencyType {
-  CONCURRENCY_TYPE_OCC = 0,  // optimistic
-  CONCURRENCY_TYPE_2PL = 1,  // pessimistic
-  CONCURRENCY_TYPE_SPEC = 2, // speculative
-  CONCURRENCY_TYPE_TO = 3,   // timestamp ordering
-  CONCURRENCY_TYPE_SSI = 4   // serializable snapshot isolation
+  CONCURRENCY_TYPE_OPTIMISTIC = 0,        // optimistic
+  CONCURRENCY_TYPE_PESSIMISTIC = 1,       // pessimistic
+  CONCURRENCY_TYPE_SPECULATIVE_READ = 2,  // optimistic + speculative read
+  CONCURRENCY_TYPE_EAGER_WRITE = 3,       // pessimistic + eager write
+  CONCURRENCY_TYPE_TO = 4,                // timestamp ordering
+  CONCURRENCY_TYPE_SSI = 5                // serializable snapshot isolation
 };
 
 enum IsolationLevelType {
@@ -685,7 +676,11 @@ enum LogRecordType {
   // DML records for Write behind logging
   LOGRECORD_TYPE_WBL_TUPLE_INSERT = 31,
   LOGRECORD_TYPE_WBL_TUPLE_DELETE = 32,
-  LOGRECORD_TYPE_WBL_TUPLE_UPDATE = 33
+  LOGRECORD_TYPE_WBL_TUPLE_UPDATE = 33,
+
+  // Record for delimiting transactions
+  // includes max persistent commit_id
+  LOGRECORD_TYPE_ITERATION_DELIMITER = 41,
 };
 
 static const int INVALID_FILE_DESCRIPTOR = -1;

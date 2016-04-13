@@ -63,7 +63,7 @@ storage::Tuple *ReadTupleRecordBody(catalog::Schema *schema, VarlenPool *pool,
 void SkipTupleRecordBody(FILE *log_file, size_t log_file_size);
 
 // Wrappers
-storage::DataTable *GetTable(TupleRecord tupleRecord);
+storage::DataTable *GetTable(TupleRecord &tupleRecord);
 
 //===--------------------------------------------------------------------===//
 // Simple Checkpoint
@@ -101,27 +101,24 @@ void SimpleCheckpoint::DoCheckpoint() {
   auto &txn_manager = concurrency::TransactionManagerFactory::GetInstance();
   auto &log_manager = LogManager::GetInstance();
   // wait if recovery is in process
-  log_manager.WaitForMode(LOGGING_STATUS_TYPE_LOGGING, true);
+  log_manager.WaitForModeTransition(LOGGING_STATUS_TYPE_LOGGING, true);
   logger_ = log_manager.GetBackendLogger();
 
   while (true) {
-    // build executor context
-    std::unique_ptr<concurrency::Transaction> txn(
-        txn_manager.BeginTransaction());
-    start_commit_id = txn->GetBeginCommitId();
-    assert(txn);
-    assert(txn.get());
+    // get txn
+    auto start_commit_id =
+        log_manager.GetFrontendLogger()->GetMaxFlushedCommitId();
+    std::unique_ptr<concurrency::Transaction> txn(new concurrency::Transaction(
+        txn_manager.GetNextTransactionId(), start_commit_id));
+    concurrency::current_txn = txn.get();
     LOG_TRACE("Txn ID = %lu, Start commit id = %lu ", txn->GetTransactionId(),
               start_commit_id);
 
+    // build executor context
     std::unique_ptr<executor::ExecutorContext> executor_context(
         new executor::ExecutorContext(
             txn.get(), bridge::PlanTransformer::BuildParams(nullptr)));
     LOG_TRACE("Building the executor tree");
-
-    auto &catalog_manager = catalog::Manager::GetInstance();
-    auto database_count = catalog_manager.GetDatabaseCount();
-    bool failure = false;
 
     // Add txn begin record
     std::shared_ptr<LogRecord> begin_record(new TransactionRecord(
@@ -130,14 +127,20 @@ void SimpleCheckpoint::DoCheckpoint() {
     begin_record->Serialize(begin_output_buffer);
     records_.push_back(begin_record);
 
+    auto &catalog_manager = catalog::Manager::GetInstance();
+    auto database_count = catalog_manager.GetDatabaseCount();
+    bool failure = false;
+    // loop all databases
     for (oid_t database_idx = 0; database_idx < database_count && !failure;
          database_idx++) {
       auto database = catalog_manager.GetDatabase(database_idx);
       auto table_count = database->GetTableCount();
       auto database_oid = database->GetOid();
+
+      // loop all tables
       for (oid_t table_idx = 0; table_idx < table_count && !failure;
            table_idx++) {
-        /* Get the target table */
+        // Get the target table
         storage::DataTable *target_table = database->GetTable(table_idx);
         assert(target_table);
         LOG_INFO("SeqScan: database oid %lu table oid %lu: %s", database_idx,
@@ -149,13 +152,14 @@ void SimpleCheckpoint::DoCheckpoint() {
         column_ids.resize(schema->GetColumnCount());
         std::iota(column_ids.begin(), column_ids.end(), 0);
 
-        /* Construct the Peloton plan node */
+        // Construct the plan node
         LOG_TRACE("Initializing the executor tree");
         std::unique_ptr<planner::SeqScanPlan> scan_plan_node(
             new planner::SeqScanPlan(target_table, nullptr, column_ids));
         std::unique_ptr<executor::SeqScanExecutor> scan_executor(
             new executor::SeqScanExecutor(scan_plan_node.get(),
                                           executor_context.get()));
+        scan_executor->SetCheckpointMode(true);
         if (!Execute(scan_executor.get(), txn.get(), target_table,
                      database_oid)) {
           break;
@@ -180,25 +184,25 @@ void SimpleCheckpoint::DoCheckpoint() {
   }
 }
 
-bool SimpleCheckpoint::DoRecovery() {
+cid_t SimpleCheckpoint::DoRecovery() {
   // open log file and file descriptor
   // we open it in read + binary mode
   if (checkpoint_version < 0) {
-    return false;
+    return 0;
   }
   std::string file_name = ConcatFileName(checkpoint_dir, checkpoint_version);
   checkpoint_file_ = fopen(file_name.c_str(), "rb");
 
   if (checkpoint_file_ == NULL) {
     LOG_ERROR("Checkpoint File is NULL");
-    return false;
+    return 0;
   }
 
   // also, get the descriptor
   checkpoint_file_fd_ = fileno(checkpoint_file_);
   if (checkpoint_file_fd_ == INVALID_FILE_DESCRIPTOR) {
     LOG_ERROR("checkpoint_file_fd_ is -1");
-    return false;
+    return 0;
   }
 
   checkpoint_file_size_ = GetLogFileSize(checkpoint_file_fd_);
@@ -210,7 +214,7 @@ bool SimpleCheckpoint::DoRecovery() {
         GetNextLogRecordType(checkpoint_file_, checkpoint_file_size_);
     switch (record_type) {
       case LOGRECORD_TYPE_WAL_TUPLE_INSERT: {
-        LOG_INFO("Read checkpoint insert entry");
+        LOG_TRACE("Read checkpoint insert entry");
         InsertTuple(commit_id);
         break;
       }
@@ -219,7 +223,7 @@ bool SimpleCheckpoint::DoRecovery() {
         break;
       }
       case LOGRECORD_TYPE_TRANSACTION_BEGIN: {
-        LOG_INFO("Read checkpoint begin entry");
+        LOG_TRACE("Read checkpoint begin entry");
         TransactionRecord txn_rec(record_type);
         if (ReadTransactionRecordHeader(txn_rec, checkpoint_file_,
                                         checkpoint_file_size_) == false) {
@@ -244,8 +248,9 @@ bool SimpleCheckpoint::DoRecovery() {
     manager.SetNextOid(max_oid_);
   }
 
+  //FIXME
   concurrency::TransactionManagerFactory::GetInstance().SetNextCid(commit_id);
-  return true;
+  return commit_id;
 }
 
 void SimpleCheckpoint::InsertTuple(cid_t commit_id) {
@@ -273,13 +278,14 @@ void SimpleCheckpoint::InsertTuple(cid_t commit_id) {
     LOG_ERROR("Torn checkpoint write.");
     return;
   }
-
   auto target_location = tuple_record.GetInsertLocation();
   auto tile_group_id = target_location.block;
   RecoverTuple(tuple.get(), table, target_location, commit_id);
   if (max_oid_ < target_location.block) {
     max_oid_ = tile_group_id;
   }
+  LOG_TRACE("Inserted a tuple from checkpoint: (%lu, %lu)",
+            target_location.block, target_location.offset);
 }
 
 bool SimpleCheckpoint::Execute(executor::AbstractExecutor *scan_executor,
@@ -296,6 +302,7 @@ bool SimpleCheckpoint::Execute(executor::AbstractExecutor *scan_executor,
   auto status = scan_executor->Init();
   // Abort and cleanup
   if (status == false) {
+    LOG_ERROR("Failed to init scan executor during checkpoint");
     return false;
   }
   LOG_TRACE("Running the seq scan executor");
@@ -332,8 +339,8 @@ bool SimpleCheckpoint::Execute(executor::AbstractExecutor *scan_executor,
         assert(logger_);
         std::shared_ptr<LogRecord> record(logger_->GetTupleRecord(
             LOGRECORD_TYPE_TUPLE_INSERT, txn->GetTransactionId(),
-            target_table->GetOid(), location, INVALID_ITEMPOINTER, tuple.get(),
-            database_oid));
+            target_table->GetOid(), database_oid, location, INVALID_ITEMPOINTER,
+            tuple.get()));
         assert(record);
         CopySerializeOutput output_buffer;
         record->Serialize(output_buffer);
@@ -429,6 +436,7 @@ void SimpleCheckpoint::InitVersionNumber() {
     LOG_INFO("Opendir failed: Errno: %d, error: %s", errno, strerror(errno));
     return;
   }
+
   while ((file = readdir(dirp)) != NULL) {
     if (strncmp(file->d_name, FILE_PREFIX.c_str(), FILE_PREFIX.length()) == 0) {
       // found a checkpoint file!

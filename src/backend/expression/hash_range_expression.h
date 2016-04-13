@@ -111,6 +111,15 @@ class HashRangeExpression : public AbstractExpression {
 
   int GetColumnId() const { return this->value_idx; }
 
+  AbstractExpression *Copy() const {
+    srange_type *copied_ranges = new srange_type[num_ranges];
+    for (int ii = 0; ii < num_ranges; ii++) {
+      copied_ranges[ii].first = ranges[ii].first;
+      copied_ranges[ii].second = ranges[ii].second;
+    }
+    return new HashRangeExpression(value_idx, copied_ranges, num_ranges);
+  }
+
  private:
   const int value_idx;  // which (offset) column of the tuple
   boost::scoped_array<srange_type> ranges;

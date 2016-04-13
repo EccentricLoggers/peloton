@@ -95,10 +95,6 @@ class TileGroup : public Printable {
   oid_t InsertTupleFromCheckpoint(oid_t tuple_slot_id,
                     const Tuple *tuple, cid_t commit_id);
 
-  // delete tuple at given slot if it is not already locked
-  // bool DeleteTuple(txn_id_t transaction_id, oid_t tuple_slot_id,
-  //                  cid_t last_cid);
-
   //===--------------------------------------------------------------------===//
   // Utilities
   //===--------------------------------------------------------------------===//
@@ -108,9 +104,7 @@ class TileGroup : public Printable {
 
   oid_t GetNextTupleSlot() const;
 
-  // Count of tuples that are active w.r.t. this transaction id
-  oid_t GetActiveTupleCount(txn_id_t txn_id) const;
-
+  // this function is called only when building tile groups for aggregation operations.
   oid_t GetActiveTupleCount() const;
 
   oid_t GetAllocatedTupleCount() const { return num_tuple_slots; }

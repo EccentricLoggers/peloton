@@ -18,6 +18,7 @@
 
 #include "backend/logging/logger.h"
 #include "backend/logging/log_record.h"
+#include "backend/logging/log_buffer.h"
 
 namespace peloton {
 namespace logging {
@@ -27,36 +28,18 @@ namespace logging {
 //===--------------------------------------------------------------------===//
 
 class BackendLogger : public Logger {
+  friend class FrontendLogger;
+
  public:
-  BackendLogger() { logger_type = LOGGER_TYPE_BACKEND; }
+  BackendLogger();
 
   ~BackendLogger();
 
   static BackendLogger *GetBackendLogger(LoggingType logging_type);
 
-  // Get the log record in the local queue at given offset
-  LogRecord *GetLogRecord(oid_t offset);
-
-  void Commit(void);
-
-  bool IsConnectedToFrontend(void) const;
-
-  void SetConnectedToFrontend(bool isConnected);
-
-  // Truncate the log file at given offset
-  void TruncateLocalQueue(oid_t offset);
-
-  void WaitForFlushing(void);
-
-  size_t GetLocalQueueSize(void);
-
   //===--------------------------------------------------------------------===//
   // Virtual Functions
   //===--------------------------------------------------------------------===//
-
-  /**
-   * Record log
-   */
 
   // Log the given record
   virtual void Log(LogRecord *record) = 0;
@@ -64,27 +47,30 @@ class BackendLogger : public Logger {
   // Construct a log record with tuple information
   virtual LogRecord *GetTupleRecord(LogRecordType log_record_type,
                                     txn_id_t txn_id, oid_t table_oid,
-                                    ItemPointer insert_location,
+                                    oid_t db_oid, ItemPointer insert_location,
                                     ItemPointer delete_location,
-                                    void *data = nullptr,
-                                    oid_t db_oid = INVALID_OID) = 0;
+                                    void *data = nullptr) = 0;
+
+  cid_t GetHighestLoggedCommitId() { return highest_logged_commit_id; };
+
+  void SetHighestLoggedCommitId(cid_t cid) { highest_logged_commit_id = cid; };
+
+  // FIXME The following methods should be exposed to FrontendLogger only
+  // Collect all log buffers to be persisted
+  virtual std::vector<std::unique_ptr<LogBuffer>> &CollectLogBuffers() = 0;
+
+  // Grant an empty buffer to use
+  virtual void GrantEmptyBuffer(std::unique_ptr<LogBuffer>) = 0;
 
  protected:
-  bool IsWaitingForFlushing(void);
 
-  std::vector<LogRecord *> local_queue;
-  std::mutex local_queue_mutex;
+  std::vector<std::unique_ptr<LogBuffer>> local_queue;
 
-  // wait for the frontend to flush
-  // need to ensure synchronous commit
-  bool wait_for_flushing = false;
+  cid_t highest_logged_commit_id = 0;
 
-  // Used for notify any waiting thread that backend is flushed
-  std::mutex flush_notify_mutex;
-  std::condition_variable flush_notify_cv;
+  cid_t highest_flushed_cid = 0;
 
-  // is this backend connected to frontend ?
-  bool connected_to_frontend = false;
+
 };
 
 }  // namespace logging
