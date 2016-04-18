@@ -14,7 +14,6 @@
 
 #include "backend/common/types.h"
 #include "backend/logging/backend_logger.h"
-#include "backend/common/platform.h"
 #include "backend/logging/log_buffer.h"
 #include "backend/logging/circular_buffer_pool.h"
 
@@ -39,18 +38,16 @@ class WriteAheadBackendLogger : public BackendLogger {
   LogRecord *GetTupleRecord(LogRecordType log_record_type, txn_id_t txn_id,
                             oid_t table_oid, oid_t db_oid,
                             ItemPointer insert_location,
-                            ItemPointer delete_location, void *data = nullptr);
-  std::vector<std::unique_ptr<LogBuffer>> &CollectLogBuffers();
+                            ItemPointer delete_location,
+                            const void *data = nullptr);
+
+  std::pair<cid_t, cid_t> PrepareLogBuffers();
 
   void GrantEmptyBuffer(std::unique_ptr<LogBuffer>);
 
  private:
-
   // temporary serialization buffer
   CopySerializeOutput output_buffer;
-
-  // the lock for the buffer being used currently
-  Spinlock log_buffer_lock_;
 
   // the current buffer
   std::unique_ptr<LogBuffer> log_buffer_;
@@ -60,7 +57,6 @@ class WriteAheadBackendLogger : public BackendLogger {
 
   // the pool of buffers to persist
   std::unique_ptr<BufferPool> persist_buffer_pool_;
-
 };
 
 }  // namespace logging

@@ -13,6 +13,7 @@
 #pragma once
 
 #include <memory>
+#include <queue>
 
 #include "backend/brain/sample.h"
 #include "backend/bridge/ddl/bridge.h"
@@ -20,6 +21,7 @@
 #include "backend/storage/abstract_table.h"
 #include "backend/concurrency/transaction.h"
 #include "backend/common/platform.h"
+#include "backend/logging/log_manager.h"
 
 //===--------------------------------------------------------------------===//
 // GUC Variables
@@ -57,11 +59,14 @@ namespace index {
 class Index;
 }
 
+namespace logging {
+class LogManager;
+}
+
 namespace storage {
 
 class Tuple;
 class TileGroup;
-
 
 //===--------------------------------------------------------------------===//
 // DataTable
@@ -80,6 +85,7 @@ class DataTable : public AbstractTable {
   friend class TileGroup;
   friend class TileGroupFactory;
   friend class TableFactory;
+  friend class logging::LogManager;
 
   DataTable() = delete;
   DataTable(DataTable const &) = delete;
@@ -224,6 +230,9 @@ class DataTable : public AbstractTable {
 
   // get a partitioning with given layout type
   column_map_type GetTileGroupLayout(LayoutType layout_type);
+
+  // Drop all tile groups of the table. Used by recovery
+  void DropTileGroups();
 
   //===--------------------------------------------------------------------===//
   // INDEX HELPERS

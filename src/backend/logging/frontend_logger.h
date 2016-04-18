@@ -30,9 +30,6 @@
 
 namespace peloton {
 namespace logging {
-
-class Checkpoint;
-
 //===--------------------------------------------------------------------===//
 // Frontend Logger
 //===--------------------------------------------------------------------===//
@@ -43,7 +40,8 @@ class FrontendLogger : public Logger {
 
   ~FrontendLogger();
 
-  static FrontendLogger *GetFrontendLogger(LoggingType logging_type);
+  static FrontendLogger *GetFrontendLogger(LoggingType logging_type,
+                                           bool test_mode = false);
 
   void MainLoop(void);
 
@@ -82,6 +80,8 @@ class FrontendLogger : public Logger {
 
   cid_t GetMaxFlushedCommitId();
 
+  void SetMaxFlushedCommitId(cid_t cid);
+
   void SetBackendLoggerLoggedCid(BackendLogger &bel);
 
  protected:
@@ -92,17 +92,15 @@ class FrontendLogger : public Logger {
   std::vector<std::unique_ptr<LogBuffer>> global_queue;
 
   // To synch the status
-  std::atomic_flag backend_loggers_lock;
+  Spinlock backend_loggers_lock;
 
   // period with which it collects log records from backend loggers
-  // (in microseconds)
+  // (in milliseconds)
   int64_t wait_timeout;
 
   // stats
   size_t fsync_count = 0;
 
-  // checkpoint
-  Checkpoint &checkpoint;
   // Txn table during recovery
   std::map<txn_id_t, std::vector<TupleRecord *>> recovery_txn_table;
 
@@ -118,6 +116,8 @@ class FrontendLogger : public Logger {
   cid_t max_flushed_commit_id = 0;
 
   cid_t max_collected_commit_id = 0;
+
+  cid_t max_seen_commit_id = 0;
 };
 
 }  // namespace logging

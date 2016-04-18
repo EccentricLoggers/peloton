@@ -74,10 +74,6 @@ namespace peloton {
 namespace benchmark {
 namespace ycsb {
 
-std::ofstream out("outputfile.summary");
-
-static void WriteOutput(double stat);
-
 /////////////////////////////////////////////////////////
 // TRANSACTION TYPES
 /////////////////////////////////////////////////////////
@@ -109,11 +105,9 @@ void RunBackend(oid_t thread_id) {
 
     if (rng_val < update_ratio) {
       RunUpdate();
-    }
-    else {
+    } else {
       RunRead();
     }
-
   }
 
   // Stop timer
@@ -123,8 +117,7 @@ void RunBackend(oid_t thread_id) {
   durations[thread_id] = timer.GetDuration();
 }
 
-void RunWorkload() {
-
+double RunWorkload() {
   // Execute the workload to build the log
   std::vector<std::thread> thread_group;
   oid_t num_threads = state.backend_count;
@@ -146,24 +139,9 @@ void RunWorkload() {
     max_duration = std::max(max_duration, durations[thread_itr]);
   }
 
-  double throughput = (state.transaction_count * num_threads)/max_duration;
+  double throughput = (state.transaction_count * num_threads) / max_duration;
 
-  WriteOutput(throughput);
-}
-
-static void WriteOutput(double stat) {
-  LOG_INFO("----------------------------------------------------------");
-  LOG_INFO("%lf %d %d :: %lf tps",
-           state.update_ratio,
-           state.scale_factor,
-           state.column_count,
-           stat);
-
-  out << state.update_ratio << " ";
-  out << state.scale_factor << " ";
-  out << state.column_count << " ";
-  out << stat << "\n";
-  out.flush();
+  return throughput;
 }
 
 /////////////////////////////////////////////////////////
@@ -185,12 +163,10 @@ static void ExecuteTest(std::vector<executor::AbstractExecutor *> &executors) {
 
     // Execute stuff
     while (executor->Execute() == true) {
-      std::unique_ptr<executor::LogicalTile> result_tile(
-          executor->GetOutput());
+      std::unique_ptr<executor::LogicalTile> result_tile(executor->GetOutput());
       result_tiles.emplace_back(result_tile.release());
     }
   }
-
 }
 
 /////////////////////////////////////////////////////////
@@ -228,8 +204,7 @@ void RunRead() {
   auto lookup_key = rand() % tuple_count;
 
   key_column_ids.push_back(0);
-  expr_types.push_back(
-      ExpressionType::EXPRESSION_TYPE_COMPARE_EQUAL);
+  expr_types.push_back(ExpressionType::EXPRESSION_TYPE_COMPARE_EQUAL);
   values.push_back(ValueFactory::GetIntegerValue(lookup_key));
 
   auto ycsb_pkey_index = user_table->GetIndexWithOid(user_table_pkey_index_oid);
@@ -240,8 +215,7 @@ void RunRead() {
   // Create plan node.
   auto predicate = nullptr;
 
-  planner::IndexScanPlan index_scan_node(user_table,
-                                         predicate, column_ids,
+  planner::IndexScanPlan index_scan_node(user_table, predicate, column_ids,
                                          index_scan_desc);
 
   // Run the executor
@@ -259,10 +233,9 @@ void RunRead() {
   }
 
   std::shared_ptr<const catalog::Schema> output_schema{
-    catalog::Schema::CopySchema(user_table->GetSchema())};
+      catalog::Schema::CopySchema(user_table->GetSchema())};
   bool physify_flag = true;  // is going to create a physical tile
-  planner::MaterializationPlan mat_node(old_to_new_cols,
-                                        output_schema,
+  planner::MaterializationPlan mat_node(old_to_new_cols, output_schema,
                                         physify_flag);
 
   executor::MaterializationExecutor mat_executor(&mat_node, nullptr);
@@ -311,8 +284,7 @@ void RunUpdate() {
   auto lookup_key = rand() % tuple_count;
 
   key_column_ids.push_back(0);
-  expr_types.push_back(
-      ExpressionType::EXPRESSION_TYPE_COMPARE_EQUAL);
+  expr_types.push_back(ExpressionType::EXPRESSION_TYPE_COMPARE_EQUAL);
   values.push_back(ValueFactory::GetIntegerValue(lookup_key));
 
   auto ycsb_pkey_index = user_table->GetIndexWithOid(user_table_pkey_index_oid);
@@ -323,8 +295,7 @@ void RunUpdate() {
   // Create plan node.
   auto predicate = nullptr;
 
-  planner::IndexScanPlan index_scan_node(user_table,
-                                         predicate, column_ids,
+  planner::IndexScanPlan index_scan_node(user_table, predicate, column_ids,
                                          index_scan_desc);
 
   // Run the executor
@@ -340,14 +311,16 @@ void RunUpdate() {
 
   // Update the second attribute
   for (oid_t col_itr = 0; col_itr < column_count; col_itr++) {
-    if(col_itr != 1) {
+    if (col_itr != 1) {
       direct_map_list.emplace_back(col_itr,
                                    std::pair<oid_t, oid_t>(0, col_itr));
     }
   }
 
-  Value update_val = ValueFactory::GetStringValue(std::string("updated"));
-  target_list.emplace_back(1, expression::ExpressionUtil::ConstantValueFactory(update_val));
+  std::string update_raw_value(ycsb_field_length - 1, 'u');
+  Value update_val = ValueFactory::GetStringValue(update_raw_value);
+  target_list.emplace_back(
+      1, expression::ExpressionUtil::ConstantValueFactory(update_val));
 
   std::unique_ptr<const planner::ProjectInfo> project_info(
       new planner::ProjectInfo(std::move(target_list),

@@ -101,7 +101,7 @@ class Value;
 #define DEFAULT_DB_ID 12345
 #define DEFAULT_DB_NAME "default"
 
-#define DEFAULT_TUPLES_PER_TILEGROUP 1000
+extern int DEFAULT_TUPLES_PER_TILEGROUP;
 
 // TODO: Use ThreadLocalPool ?
 // This needs to be >= the VoltType.MAX_VALUE_LENGTH defined in java, currently
@@ -368,7 +368,9 @@ enum BackendType {
   BACKEND_TYPE_INVALID = 0,  // invalid backend type
 
   BACKEND_TYPE_MM = 1,   // on volatile memory
-  BACKEND_TYPE_FILE = 2  // on mmap file
+  BACKEND_TYPE_NVM = 2,  // on non-volatile memory
+  BACKEND_TYPE_SSD = 3,  // on ssd
+  BACKEND_TYPE_HDD = 4   // on hdd
 };
 
 //===--------------------------------------------------------------------===//
@@ -683,6 +685,14 @@ enum LogRecordType {
   LOGRECORD_TYPE_ITERATION_DELIMITER = 41,
 };
 
+enum CheckpointStatus {
+  CHECKPOINT_STATUS_INVALID = 0,
+  CHECKPOINT_STATUS_STANDBY = 1,
+  CHECKPOINT_STATUS_RECOVERY = 2,
+  CHECKPOINT_STATUS_DONE_RECOVERY = 3,
+  CHECKPOINT_STATUS_CHECKPOINTING = 4,
+};
+
 static const int INVALID_FILE_DESCRIPTOR = -1;
 
 // ------------------------------------------------------------------
@@ -774,9 +784,11 @@ int64_t GetMaxTypeValue(ValueType type);
 
 bool HexDecodeToBinary(unsigned char *bufferdst, const char *hexString);
 
-bool IsBasedOnWriteAheadLogging(LoggingType logging_type);
+bool IsBasedOnWriteAheadLogging(const LoggingType& logging_type);
 
-bool IsBasedOnWriteBehindLogging(LoggingType logging_type);
+bool IsBasedOnWriteBehindLogging(const LoggingType& logging_type);
+
+BackendType GetBackendType(const LoggingType& logging_type);
 
 //===--------------------------------------------------------------------===//
 // Transformers

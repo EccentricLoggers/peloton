@@ -69,7 +69,7 @@ class WriteAheadFrontendLogger : public FrontendLogger {
 
   LogRecordType GetNextLogRecordTypeForRecovery();
 
-  void TruncateLog(txn_id_t);
+  void TruncateLog(cid_t);
 
   void SetLogDirectory(char *);
 
@@ -77,13 +77,13 @@ class WriteAheadFrontendLogger : public FrontendLogger {
 
   std::string GetFileNameFromVersion(int);
 
-  txn_id_t ExtractMaxCommitIdFromLogFileRecords(FILE *);
+  std::pair<cid_t, cid_t> ExtractMaxLogIdAndMaxDelimFromLogFileRecords(FILE *);
 
  private:
   std::string GetLogFileName(void);
 
-  bool RecoverIndexHelper(executor::AbstractExecutor *scan_executor,
-                          storage::DataTable *target_table);
+  bool RecoverTableIndexHelper(storage::DataTable *target_table,
+                               cid_t start_cid);
 
   void InsertIndexEntry(storage::Tuple *tuple, storage::DataTable *table,
                         ItemPointer target_location);
@@ -94,7 +94,7 @@ class WriteAheadFrontendLogger : public FrontendLogger {
 
   // File pointer and descriptor
   FILE *log_file;
-  int log_file_fd;
+  int log_file_fd = INVALID_FILE_DESCRIPTOR;
 
   // Size of the log file
   size_t log_file_size;
@@ -120,11 +120,15 @@ class WriteAheadFrontendLogger : public FrontendLogger {
 
   std::string LOG_FILE_SUFFIX = ".log";
 
-  txn_id_t max_commit_id;
+  cid_t max_log_id_file = INVALID_CID;
 
   CopySerializeOutput output_buffer;
 
   std::set<cid_t> pending_commits;
+
+  cid_t max_delimiter_file = 0;
+
+  bool test_mode_ = false;
 };
 
 }  // namespace logging

@@ -51,6 +51,12 @@ class LogManager {
   // global singleton
   static LogManager &GetInstance(void);
 
+  // configuration
+  static void Configure(LoggingType logging_type, bool test_mode = false) {
+    logging_type_ = logging_type;
+    test_mode_ = test_mode;
+  }
+
   // Wait for the system to begin
   void StartStandbyMode();
 
@@ -104,6 +110,12 @@ class LogManager {
     return (peloton_logging_mode == LOGGING_TYPE_NVM_NVM);
   }
 
+  // Drop all default tiles for tables before recovery
+  void PrepareRecovery();
+
+  // Add default tiles for tables if necessary
+  void DoneRecovery();
+
   //===--------------------------------------------------------------------===//
   // Utility Functions
   //===--------------------------------------------------------------------===//
@@ -135,12 +147,16 @@ class LogManager {
   //===--------------------------------------------------------------------===//
   // Data members
   //===--------------------------------------------------------------------===//
+  static LoggingType logging_type_;
+  static bool test_mode_;
 
   // There is only one frontend_logger of some type
   // either write ahead or write behind logging
   std::unique_ptr<FrontendLogger> frontend_logger;
 
   LoggingStatus logging_status = LOGGING_STATUS_TYPE_INVALID;
+
+  bool prepared_recovery_ = false;
 
   // To synch the status
   std::mutex logging_status_mutex;
