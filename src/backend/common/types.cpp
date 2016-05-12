@@ -738,6 +738,9 @@ IndexConstraintType StringToIndexConstraintType(std::string str) {
 
 std::string PlanNodeTypeToString(PlanNodeType type) {
   switch (type) {
+    case PLAN_NODE_TYPE_EXCHANGE_HASH_JOIN: {
+      return "EXCHANGE_HASH_JOIN";
+    }
     case PLAN_NODE_TYPE_INVALID: {
       return "INVALID";
     }

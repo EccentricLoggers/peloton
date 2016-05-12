@@ -201,6 +201,8 @@ class PlanTransformer {
 
   static const planner::ProjectInfo *BuildProjectInfoFromTLSkipJunk(
       List *targetLis);
+
+  static const planner::AbstractPlan *BuildParallelPlan(const planner::AbstractPlan *old_plan);
 };
 
 }  // namespace bridge

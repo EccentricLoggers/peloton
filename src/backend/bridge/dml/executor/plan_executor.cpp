@@ -314,6 +314,11 @@ executor::ExecutorContext *BuildExecutorContext(const std::vector<Value> &params
 executor::AbstractExecutor *BuildExecutorTree(
     executor::AbstractExecutor *root, const planner::AbstractPlan *plan,
     executor::ExecutorContext *executor_context) {
+  /*
+   * Whether we want to enable intra-operator parallelism
+   * Should have been made configurable in a configure file
+   */
+  static const bool parallel_mode = false;
   // Base case
   if (plan == nullptr) return root;
 
@@ -326,7 +331,10 @@ executor::AbstractExecutor *BuildExecutorTree(
       break;
 
     case PLAN_NODE_TYPE_SEQSCAN:
-      child_executor = new executor::SeqScanExecutor(plan, executor_context);
+      if(!parallel_mode)
+        child_executor = new executor::SeqScanExecutor(plan, executor_context);
+      else
+        child_executor = new executor::ExchangeSeqScanExecutor(plan, executor_context);
       break;
 
     case PLAN_NODE_TYPE_INDEXSCAN:
@@ -359,11 +367,17 @@ executor::AbstractExecutor *BuildExecutorTree(
       break;
 
     case PLAN_NODE_TYPE_HASH:
-      child_executor = new executor::HashExecutor(plan, executor_context);
+      if(!parallel_mode)
+        child_executor = new executor::HashExecutor(plan, executor_context);
+      else
+        child_executor = new executor::ExchangeHashExecutor(plan, executor_context);
       break;
 
     case PLAN_NODE_TYPE_HASHJOIN:
-      child_executor = new executor::HashJoinExecutor(plan, executor_context);
+      if(!parallel_mode)
+        child_executor = new executor::HashJoinExecutor(plan, executor_context);
+      else
+        child_executor = new executor::ExchangeHashJoinExecutor(plan, executor_context);
       break;
 
     case PLAN_NODE_TYPE_PROJECTION:

@@ -12,10 +12,10 @@
 
 #include <vector>
 
-#include "backend/common/types.h"
 #include "backend/common/logger.h"
-#include "backend/executor/logical_tile_factory.h"
+#include "backend/common/types.h"
 #include "backend/executor/hash_join_executor.h"
+#include "backend/executor/logical_tile_factory.h"
 #include "backend/expression/abstract_expression.h"
 #include "backend/expression/container_tuple.h"
 
@@ -72,10 +72,16 @@ bool HashJoinExecutor::DExecute() {
 
     // Get all the tiles from RIGHT child
     if (right_child_done_ == false) {
+      const auto start = std::chrono::system_clock::now();
       while (children_[1]->Execute()) {
         BufferRightTile(children_[1]->GetOutput());
       }
       right_child_done_ = true;
+
+      const auto end = std::chrono::system_clock::now();
+      const std::chrono::duration<double> diff = end - start;
+      const double ms = diff.count() * 1000;
+      printf("Hash takes takes %lf ms\n", ms);
     }
 
     // Get next tile from LEFT child

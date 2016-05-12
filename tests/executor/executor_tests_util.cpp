@@ -210,6 +210,84 @@ void ExecutorTestsUtil::PopulateTable(storage::DataTable *table, int num_rows,
   }
 }
 
+
+
+/**
+ * @brief Populates the table for ParallelTest
+ * @param table Table to populate with values.
+ * @param num_rows Number of tuples to insert.
+ */
+void ExecutorTestsUtil::PopulateTableForParallelTest(
+                                      storage::DataTable *table, int num_rows,
+                                      bool left) {
+
+  const catalog::Schema *schema = table->GetSchema();
+
+  // Ensure that the tile group is as expected.
+  assert(schema->GetColumnCount() == 4);
+
+  // Insert tuples into tile_group.
+  const bool allocate = true;
+  auto testing_pool = TestingHarness::GetInstance().GetTestingPool();
+
+  for (int rowid = 0; rowid < num_rows; rowid++) {
+    int populate_value = rowid;
+
+    storage::Tuple tuple(schema, allocate);
+
+    tuple.SetValue(
+        0, ValueFactory::GetIntegerValue(PopulatedValue(populate_value, 0)),
+        testing_pool);
+
+//    if (populate_value % 5 == 0){
+//      if (populate_value % 15 == 0){
+//        tuple.SetValue(
+//          1, ValueFactory::GetIntegerValue(PopulatedValue(populate_value, left?2:1)),
+//              testing_pool);
+//       }else {
+//        tuple.SetValue(
+//          1, ValueFactory::GetIntegerValue(PopulatedValue(populate_value, left?1:2)),
+//              testing_pool);
+//       }
+//    } else {
+      tuple.SetValue(
+        1, ValueFactory::GetIntegerValue(PopulatedValue(populate_value, 1)),
+            testing_pool);
+//    }
+    if ((populate_value % 10 == 0 || (populate_value-1) % 10 == 0)
+          && left){
+     tuple.SetValue(
+       1, ValueFactory::GetIntegerValue(11),
+         testing_pool);
+    }
+    if (populate_value < 3 && !left){
+      tuple.SetValue(
+        1, ValueFactory::GetIntegerValue(11),
+          testing_pool);
+    }
+    if (populate_value == 4 && !left){
+      tuple.SetValue(
+        1, ValueFactory::GetIntegerValue(19),
+          testing_pool);
+    }
+
+    tuple.SetValue(2, ValueFactory::GetDoubleValue(PopulatedValue(
+        populate_value, 2)), testing_pool);
+
+    Value string_value =
+        ValueFactory::GetStringValue(std::to_string(PopulatedValue(
+          populate_value, 3)));
+    tuple.SetValue(3, string_value, testing_pool);
+
+    ItemPointer tuple_slot_id = table->InsertTuple(&tuple);
+    EXPECT_TRUE(tuple_slot_id.block != INVALID_OID);
+    EXPECT_TRUE(tuple_slot_id.offset != INVALID_OID);
+    auto &txn_manager = concurrency::TransactionManagerFactory::GetInstance();
+    txn_manager.PerformInsert(tuple_slot_id);
+  }
+}
+
+
 /**
  * @brief  Populates the tiles in the given tile-group in a specific manner.
  * @param tile_group Tile-group to populate with values.
@@ -337,6 +415,35 @@ storage::DataTable *ExecutorTestsUtil::CreateTable(
   }
 
   return table;
+}
+
+storage::DataTable *ExecutorTestsUtil::CreateTable(
+        size_t tile_group_num, size_t row_num) {
+  std::unique_ptr<storage::DataTable> table(
+          ExecutorTestsUtil::CreateTable((int)row_num, false));
+  TestingHarness::GetInstance().GetNextTileGroupId();
+  size_t index = 0;
+  ExecutorTestsUtil::PopulateTiles(table->GetTileGroup(index++), row_num);
+  for (size_t i = 0; i < tile_group_num - 1; ++i) {
+    std::vector<catalog::Schema> schemas1(
+            {catalog::Schema({ExecutorTestsUtil::GetColumnInfo(0),
+                              ExecutorTestsUtil::GetColumnInfo(1)}),
+             catalog::Schema({ExecutorTestsUtil::GetColumnInfo(2),
+                              ExecutorTestsUtil::GetColumnInfo(3)})});
+    std::map<oid_t, std::pair<oid_t, oid_t>> column_map1;
+    column_map1[0] = std::make_pair(0, 0);
+    column_map1[1] = std::make_pair(0, 1);
+    column_map1[2] = std::make_pair(1, 0);
+    column_map1[3] = std::make_pair(1, 1);
+    // Create tile groups.
+    table->AddTileGroup(std::shared_ptr<storage::TileGroup>(
+            storage::TileGroupFactory::GetTileGroup(
+                    INVALID_OID, INVALID_OID,
+                    TestingHarness::GetInstance().GetNextTileGroupId(), table.get(),
+                    schemas1, column_map1, row_num)));
+    ExecutorTestsUtil::PopulateTiles(table->GetTileGroup(index++), row_num);
+  }
+  return table.release();
 }
 
 /**

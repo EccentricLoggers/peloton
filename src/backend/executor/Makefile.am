@@ -5,6 +5,9 @@
 ######################################################################
 
 executor_FILES = \
+         backend/executor/exchange_seq_scan_executor.cpp \
+         backend/executor/exchange_hash_join_executor.cpp \
+         backend/executor/exchange_hash_executor.cpp \
 		 backend/executor/abstract_executor.cpp \
 		 backend/executor/abstract_join_executor.cpp \
 		 backend/executor/executor_context.cpp \
@@ -28,7 +31,6 @@ executor_FILES = \
 		 backend/executor/aggregate_executor.cpp \
 		 backend/executor/append_executor.cpp	\
 		 backend/executor/projection_executor.cpp
-
 
 executor_INCLUDES = \
 		    -I$(srcdir)/backend/executor

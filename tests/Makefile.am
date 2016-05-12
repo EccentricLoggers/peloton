@@ -55,9 +55,8 @@ include $(srcdir)/gc/Makefile.am
 
 TESTS = $(check_SCRIPTS) $(check_PROGRAMS)
 LOG_COMPILER = $(srcdir)/test-driver.sh
- 
+
 CLEANFILES = /tmp/*.peloton
 
 check-build:
 	$(MAKE) $(AM_MAKEFLAGS) $(check_PROGRAMS)
-

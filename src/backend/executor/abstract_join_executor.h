@@ -106,8 +106,8 @@ class AbstractJoinExecutor : public AbstractExecutor {
   void BufferRightTile(LogicalTile *right_tile);
 
   void UpdateJoinRowSets();
-  void UpdateLeftJoinRowSets();
-  void UpdateRightJoinRowSets();
+  virtual void UpdateLeftJoinRowSets();
+  virtual void UpdateRightJoinRowSets();
   void UpdateFullJoinRowSets();
 
   inline LogicalTile *GetNonEmptyTile(LogicalTile *left_tile,
@@ -142,7 +142,7 @@ class AbstractJoinExecutor : public AbstractExecutor {
    * Record a matched right row, which should not be constructed
    * when building join outputs
    */
-  inline void RecordMatchedRightRow(size_t tile_idx, oid_t row_idx) {
+  virtual inline void RecordMatchedRightRow(size_t tile_idx, oid_t row_idx) {
     switch (join_type_) {
       case JOIN_TYPE_RIGHT:
       case JOIN_TYPE_OUTER:
@@ -154,8 +154,8 @@ class AbstractJoinExecutor : public AbstractExecutor {
   }
 
   bool BuildOuterJoinOutput();
-  bool BuildLeftJoinOutput();
-  bool BuildRightJoinOutput();
+  virtual bool BuildLeftJoinOutput();
+  virtual bool BuildRightJoinOutput();
 
   //===--------------------------------------------------------------------===//
   // Executor State
